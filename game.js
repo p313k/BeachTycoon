@@ -146,6 +146,49 @@ function getBeachSlotRect(index) {
   };
 }
 
+// --- Spielfigur: läuft dorthin, wo man hintippt ---
+const player = {
+  x: canvas.width / 2,
+  y: getShopRect().y / 2,
+  targetX: canvas.width / 2,
+  targetY: getShopRect().y / 2,
+  speed: 260, // Pixel pro Sekunde
+};
+
+function updatePlayer(dt) {
+  const dx = player.targetX - player.x;
+  const dy = player.targetY - player.y;
+  const dist = Math.hypot(dx, dy);
+  const step = player.speed * (dt / 1000);
+  if (dist <= step || dist === 0) {
+    player.x = player.targetX;
+    player.y = player.targetY;
+  } else {
+    player.x += (dx / dist) * step;
+    player.y += (dy / dist) * step;
+  }
+}
+
+// Läuft die Figur nah genug an einen Stand mit wartendem Kunden, wird automatisch kassiert
+function collectNearbyCustomers() {
+  ITEM_TYPES.forEach((item, i) => {
+    if (!isOwned(item.id) || isStaffed(item.id)) return;
+    const c = customers[item.id];
+    if (!c || !c.waiting) return;
+    const slot = getBeachSlotRect(i);
+    const cx = slot.x + slot.w / 2;
+    const cy = slot.y + slot.h / 2;
+    const radius = Math.max(slot.w, slot.h) * 0.8;
+    if (Math.hypot(player.x - cx, player.y - cy) <= radius) {
+      state.money += item.tapIncome;
+      c.waiting = false;
+      c.nextSpawn = performance.now() + randomDelay(1000, 9000);
+      addPopup(cx, slot.y - 10, `+${item.tapIncome}€`);
+      saveState();
+    }
+  });
+}
+
 // --- Eingabe ---
 canvas.addEventListener('pointerdown', (e) => {
   const rect = canvas.getBoundingClientRect();
@@ -162,28 +205,16 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
 
-  // Strand-Slots antippen: Geld nur abholen, wenn ein Kunde da ist
-  for (let i = 0; i < ITEM_TYPES.length; i++) {
-    const item = ITEM_TYPES[i];
-    if (!isOwned(item.id) || isStaffed(item.id)) continue;
-    const slot = getBeachSlotRect(i);
-    if (pointInRect(px, py, slot)) {
-      const c = customers[item.id];
-      if (c && c.waiting) {
-        state.money += item.tapIncome;
-        c.waiting = false;
-        c.nextSpawn = performance.now() + randomDelay(1000, 9000);
-        addPopup(slot.x + slot.w / 2, slot.y, `+${item.tapIncome}€`);
-        saveState();
-      }
-      return;
-    }
+  // Gewinn-Overlay wegtippen
+  if (won === true) {
+    won = 'dismissed';
+    return;
   }
 
-  // Gewinn-Overlay wegtippen
-  if (won && py < canvas.height * 0.5) {
-    won = 'dismissed';
-  }
+  // Sonst: Figur zum angetippten Ort auf dem Strand laufen lassen
+  const shop = getShopRect();
+  player.targetX = Math.min(Math.max(px, 20), canvas.width - 20);
+  player.targetY = Math.min(Math.max(py, 50), shop.y - 20);
 });
 
 function handleShopTap(item) {
@@ -232,6 +263,9 @@ function update(now) {
       if (!c.waiting && now >= c.nextSpawn) c.waiting = true;
     }
   }
+
+  updatePlayer(dt);
+  collectNearbyCustomers();
 
   popups = popups.filter((p) => {
     p.y -= dt * 0.03;
@@ -289,6 +323,15 @@ function draw() {
     ctx.fillText(p.text, p.x, p.y);
     ctx.globalAlpha = 1;
   });
+
+  // Spielfigur
+  ctx.textAlign = 'center';
+  ctx.beginPath();
+  ctx.ellipse(player.x, player.y + 16, 16, 6, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+  ctx.fill();
+  ctx.font = '34px sans-serif';
+  ctx.fillText('🧑', player.x, player.y + 10);
 
   // Shop-Leiste
   const shop = getShopRect();
