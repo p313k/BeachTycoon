@@ -177,9 +177,63 @@ function keyboardDirection() {
   return { dx, dy };
 }
 
+// --- Steuerkreuz (Touch) unten links ---
+let dpadDirection = null; // { key, dx, dy } oder null
+let dpadPointerId = null;
+
+function getDpadRects() {
+  const shop = getShopRect();
+  const size = 56;
+  const gap = 6;
+  const cx = 20 + size + gap;
+  const cy = shop.y - 20 - size - gap;
+  return {
+    up: { key: 'up', dx: 0, dy: -1, symbol: '▲', x: cx - size / 2, y: cy - size - gap, w: size, h: size },
+    down: { key: 'down', dx: 0, dy: 1, symbol: '▼', x: cx - size / 2, y: cy + gap, w: size, h: size },
+    left: { key: 'left', dx: -1, dy: 0, symbol: '◀', x: cx - size - gap, y: cy - size / 2, w: size, h: size },
+    right: { key: 'right', dx: 1, dy: 0, symbol: '▶', x: cx + gap, y: cy - size / 2, w: size, h: size },
+  };
+}
+
+function hitDpad(px, py) {
+  const rects = getDpadRects();
+  for (const key of Object.keys(rects)) {
+    if (pointInRect(px, py, rects[key])) return rects[key];
+  }
+  return null;
+}
+
+function releaseDpad(e) {
+  if (e.pointerId === dpadPointerId) {
+    dpadDirection = null;
+    dpadPointerId = null;
+  }
+}
+canvas.addEventListener('pointerup', releaseDpad);
+canvas.addEventListener('pointercancel', releaseDpad);
+canvas.addEventListener('pointerleave', releaseDpad);
+
+function getInputDirection() {
+  let dx = 0;
+  let dy = 0;
+  const kb = keyboardDirection();
+  dx += kb.dx;
+  dy += kb.dy;
+  if (dpadDirection) {
+    dx += dpadDirection.dx;
+    dy += dpadDirection.dy;
+  }
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.hypot(dx, dy);
+    dx /= len;
+    dy /= len;
+  }
+  return { dx, dy };
+}
+
 function updatePlayer(dt) {
   const step = player.speed * (dt / 1000);
-  const { dx, dy } = keyboardDirection();
+  const { dx, dy } = getInputDirection();
 
   if (dx !== 0 || dy !== 0) {
     const len = Math.hypot(dx, dy);
@@ -242,6 +296,14 @@ canvas.addEventListener('pointerdown', (e) => {
   // Gewinn-Overlay wegtippen
   if (won === true) {
     won = 'dismissed';
+    return;
+  }
+
+  // Steuerkreuz
+  const dpadHit = hitDpad(px, py);
+  if (dpadHit) {
+    dpadDirection = dpadHit;
+    dpadPointerId = e.pointerId;
     return;
   }
 
@@ -366,6 +428,20 @@ function draw() {
   ctx.fill();
   ctx.font = '34px sans-serif';
   ctx.fillText('🧑', player.x, player.y + 10);
+
+  // Steuerkreuz
+  const dpadRects = getDpadRects();
+  Object.values(dpadRects).forEach((r) => {
+    const active = dpadDirection && dpadDirection.key === r.key;
+    ctx.fillStyle = active ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.4)';
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 10);
+    ctx.fill();
+    ctx.fillStyle = '#1a2a3a';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(r.symbol, r.x + r.w / 2, r.y + r.h / 2 + 8);
+  });
 
   // Shop-Leiste
   const shop = getShopRect();
