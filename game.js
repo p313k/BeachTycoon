@@ -102,7 +102,7 @@ function randomDelay(min, max) {
 
 function ensureCustomerTimer(id, now) {
   if (!customers[id]) {
-    customers[id] = { waiting: false, nextSpawn: now + randomDelay(1500, 3500) };
+    customers[id] = { waiting: false, nextSpawn: now + randomDelay(1000, 4000) };
   }
 }
 
@@ -172,7 +172,7 @@ canvas.addEventListener('pointerdown', (e) => {
       if (c && c.waiting) {
         state.money += item.tapIncome;
         c.waiting = false;
-        c.nextSpawn = performance.now() + randomDelay(2000, 5000);
+        c.nextSpawn = performance.now() + randomDelay(1000, 9000);
         addPopup(slot.x + slot.w / 2, slot.y, `+${item.tapIncome}€`);
         saveState();
       }
