@@ -405,6 +405,17 @@ function updateLiegeStaff(dt) {
   }
 }
 
+// --- Neu starten ---
+function getResetButtonRect() {
+  return { x: canvas.width - 132, y: 36, w: 120, h: 28 };
+}
+
+function resetGame() {
+  if (!window.confirm('Wirklich neu starten? Der ganze Spielstand geht verloren!')) return;
+  setCookie(SAVE_KEY, JSON.stringify({ money: 0, owned: { liege: 1 }, staffed: {} }), 365);
+  location.reload();
+}
+
 // --- Eingabe ---
 canvas.addEventListener('pointerdown', (e) => {
   const rect = canvas.getBoundingClientRect();
@@ -419,6 +430,12 @@ canvas.addEventListener('pointerdown', (e) => {
       handleShopTap(item, btn);
       return;
     }
+  }
+
+  // Neu-starten-Button
+  if (pointInRect(px, py, getResetButtonRect())) {
+    resetGame();
+    return;
   }
 
   // Gewinn-Overlay wegtippen
@@ -653,6 +670,17 @@ function draw() {
 
   ctx.textAlign = 'right';
   ctx.fillText(`${countUnlocked()}/${ITEM_TYPES.length} freigeschaltet`, canvas.width - 12, 28);
+
+  // Neu-starten-Button
+  const resetBtn = getResetButtonRect();
+  ctx.fillStyle = 'rgba(26, 42, 58, 0.55)';
+  ctx.beginPath();
+  ctx.roundRect(resetBtn.x, resetBtn.y, resetBtn.w, resetBtn.h, 8);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('🔄 Neu starten', resetBtn.x + resetBtn.w / 2, resetBtn.y + resetBtn.h / 2 + 5);
 
   // Gewinn-Overlay
   if (won === true) {
