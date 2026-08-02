@@ -155,17 +155,51 @@ const player = {
   speed: 260, // Pixel pro Sekunde
 };
 
+// --- Tastatur (W/A/S/D oder Pfeiltasten) ---
+const pressedKeys = new Set();
+const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+window.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  if (MOVE_KEYS.includes(key)) e.preventDefault();
+  pressedKeys.add(key);
+});
+window.addEventListener('keyup', (e) => {
+  pressedKeys.delete(e.key.toLowerCase());
+});
+
+function keyboardDirection() {
+  let dx = 0;
+  let dy = 0;
+  if (pressedKeys.has('w') || pressedKeys.has('arrowup')) dy -= 1;
+  if (pressedKeys.has('s') || pressedKeys.has('arrowdown')) dy += 1;
+  if (pressedKeys.has('a') || pressedKeys.has('arrowleft')) dx -= 1;
+  if (pressedKeys.has('d') || pressedKeys.has('arrowright')) dx += 1;
+  return { dx, dy };
+}
+
 function updatePlayer(dt) {
-  const dx = player.targetX - player.x;
-  const dy = player.targetY - player.y;
-  const dist = Math.hypot(dx, dy);
   const step = player.speed * (dt / 1000);
+  const { dx, dy } = keyboardDirection();
+
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.hypot(dx, dy);
+    const shop = getShopRect();
+    player.x = Math.min(Math.max(player.x + (dx / len) * step, 20), canvas.width - 20);
+    player.y = Math.min(Math.max(player.y + (dy / len) * step, 50), shop.y - 20);
+    player.targetX = player.x;
+    player.targetY = player.y;
+    return;
+  }
+
+  const tx = player.targetX - player.x;
+  const ty = player.targetY - player.y;
+  const dist = Math.hypot(tx, ty);
   if (dist <= step || dist === 0) {
     player.x = player.targetX;
     player.y = player.targetY;
   } else {
-    player.x += (dx / dist) * step;
-    player.y += (dy / dist) * step;
+    player.x += (tx / dist) * step;
+    player.y += (ty / dist) * step;
   }
 }
 
