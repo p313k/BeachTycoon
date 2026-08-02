@@ -412,7 +412,12 @@ function getResetButtonRect() {
 
 function resetGame() {
   if (!window.confirm('Wirklich neu starten? Der ganze Spielstand geht verloren!')) return;
-  setCookie(SAVE_KEY, JSON.stringify({ money: 0, owned: { liege: 1 }, staffed: {} }), 365);
+  // Direkt im laufenden Zustand zurücksetzen, damit ein Spiel-Tick vor dem
+  // Neuladen nicht wieder den alten Stand ins Cookie zurückschreibt.
+  state.money = 0;
+  state.owned = { liege: 1 };
+  state.staffed = {};
+  saveState();
   location.reload();
 }
 
