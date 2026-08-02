@@ -93,6 +93,9 @@ function checkWin() {
   }
 }
 
+// Liegen werden extra behandelt (siehe unten) - alle anderen Stände laufen wie bisher
+const STAND_TYPES = ITEM_TYPES.filter((item) => item.id !== 'liege');
+
 // --- Kunden: kommen von selbst, man tippt sie an um Geld abzuholen ---
 const customers = {}; // id -> { waiting, nextSpawn }
 
@@ -106,9 +109,17 @@ function ensureCustomerTimer(id, now) {
   }
 }
 
-ITEM_TYPES.forEach((item) => {
+STAND_TYPES.forEach((item) => {
   if (isOwned(item.id) && !isStaffed(item.id)) ensureCustomerTimer(item.id, performance.now());
 });
+
+// --- Liegen: es gibt gleich mehrere, manche werden nach Benutzung eingemüllt ---
+const LOUNGER_COUNT = 10;
+const loungers = Array.from({ length: LOUNGER_COUNT }, () => ({
+  waiting: false,
+  dirty: false,
+  nextSpawn: performance.now() + randomDelay(1000, 4000),
+}));
 
 // --- Layout ---
 function getShopRect() {
@@ -128,19 +139,36 @@ function getShopButtonRect(index) {
   return { x: shop.x + col * bw + pad, y: shop.y + row * bh + pad, w: bw - pad * 2, h: bh - pad * 2 };
 }
 
-function getBeachSlotRect(index) {
+function getLoungerRect(index) {
   const shop = getShopRect();
-  const beachH = shop.y;
-  const cols = 3;
+  const top = 50;
+  const zoneH = (shop.y - top) * 0.42;
+  const cols = 5;
   const rows = 2;
-  const sw = canvas.width / cols;
-  const sh = (beachH - 60) / rows;
+  const cw = canvas.width / cols;
+  const rh = zoneH / rows;
   const col = index % cols;
   const row = Math.floor(index / cols);
-  const size = Math.min(sw, sh) * 0.6;
+  const size = Math.min(cw, rh) * 0.62;
   return {
-    x: col * sw + sw / 2 - size / 2,
-    y: 60 + row * sh + sh / 2 - size / 2,
+    x: col * cw + cw / 2 - size / 2,
+    y: top + row * rh + rh / 2 - size / 2,
+    w: size,
+    h: size,
+  };
+}
+
+function getStandSlotRect(index) {
+  const shop = getShopRect();
+  const loungerZoneH = (shop.y - 50) * 0.42;
+  const top = 50 + loungerZoneH;
+  const zoneH = shop.y - top;
+  const cols = STAND_TYPES.length;
+  const cw = canvas.width / cols;
+  const size = Math.min(cw, zoneH) * 0.55;
+  return {
+    x: index * cw + cw / 2 - size / 2,
+    y: top + zoneH / 2 - size / 2,
     w: size,
     h: size,
   };
@@ -259,11 +287,11 @@ function updatePlayer(dt) {
 
 // Läuft die Figur nah genug an einen Stand mit wartendem Kunden, wird automatisch kassiert
 function collectNearbyCustomers() {
-  ITEM_TYPES.forEach((item, i) => {
+  STAND_TYPES.forEach((item, i) => {
     if (!isOwned(item.id) || isStaffed(item.id)) return;
     const c = customers[item.id];
     if (!c || !c.waiting) return;
-    const slot = getBeachSlotRect(i);
+    const slot = getStandSlotRect(i);
     const cx = slot.x + slot.w / 2;
     const cy = slot.y + slot.h / 2;
     const radius = Math.max(slot.w, slot.h) * 0.8;
@@ -273,6 +301,49 @@ function collectNearbyCustomers() {
       c.nextSpawn = performance.now() + randomDelay(1000, 9000);
       addPopup(cx, slot.y - 10, `+${item.tapIncome}€`);
       saveState();
+    }
+  });
+}
+
+const LIEGE = ITEM_TYPES.find((item) => item.id === 'liege');
+const TRASH_CHANCE = 0.25;
+
+// Läuft die Figur nah genug an eine Liege mit wartendem Kunden, wird kassiert (manchmal bleibt Müll zurück)
+function collectNearbyLoungers() {
+  if (isStaffed('liege')) return; // Personal kümmert sich automatisch, kein manuelles Abholen nötig
+  loungers.forEach((l, i) => {
+    if (!l.waiting) return;
+    const slot = getLoungerRect(i);
+    const cx = slot.x + slot.w / 2;
+    const cy = slot.y + slot.h / 2;
+    const radius = Math.max(slot.w, slot.h) * 0.8;
+    if (Math.hypot(player.x - cx, player.y - cy) <= radius) {
+      state.money += LIEGE.tapIncome;
+      l.waiting = false;
+      addPopup(cx, slot.y - 10, `+${LIEGE.tapIncome}€`);
+      if (Math.random() < TRASH_CHANCE) {
+        l.dirty = true;
+      } else {
+        l.nextSpawn = performance.now() + randomDelay(1000, 9000);
+      }
+      saveState();
+    }
+  });
+}
+
+// Läuft die Figur nah genug an eine eingemüllte Liege, wird sie sauber gemacht
+function cleanNearbyLoungers() {
+  if (isStaffed('liege')) return;
+  loungers.forEach((l, i) => {
+    if (!l.dirty) return;
+    const slot = getLoungerRect(i);
+    const cx = slot.x + slot.w / 2;
+    const cy = slot.y + slot.h / 2;
+    const radius = Math.max(slot.w, slot.h) * 0.8;
+    if (Math.hypot(player.x - cx, player.y - cy) <= radius) {
+      l.dirty = false;
+      l.nextSpawn = performance.now() + randomDelay(1000, 9000);
+      addPopup(cx, slot.y - 10, '🧹 sauber!');
     }
   });
 }
@@ -352,7 +423,7 @@ function update(now) {
   }
 
   // Kunden kommen von selbst zu unbesetzten Ständen
-  for (const item of ITEM_TYPES) {
+  for (const item of STAND_TYPES) {
     if (isOwned(item.id) && !isStaffed(item.id)) {
       ensureCustomerTimer(item.id, now);
       const c = customers[item.id];
@@ -360,8 +431,17 @@ function update(now) {
     }
   }
 
+  // Kunden kommen von selbst zu sauberen, freien Liegen (nicht zu eingemüllten)
+  if (!isStaffed('liege')) {
+    for (const l of loungers) {
+      if (!l.dirty && !l.waiting && now >= l.nextSpawn) l.waiting = true;
+    }
+  }
+
   updatePlayer(dt);
   collectNearbyCustomers();
+  collectNearbyLoungers();
+  cleanNearbyLoungers();
 
   popups = popups.filter((p) => {
     p.y -= dt * 0.03;
@@ -377,10 +457,36 @@ function draw() {
   ctx.fillStyle = '#2e86ab';
   ctx.fillRect(0, 0, canvas.width, 40);
 
-  // Aufgestellte Sachen
-  ITEM_TYPES.forEach((item, i) => {
+  // Liegen (10 Stück)
+  const liegeStaffed = isStaffed('liege');
+  loungers.forEach((l, i) => {
+    const slot = getLoungerRect(i);
+    ctx.fillStyle = l.dirty ? '#8a7455' : LIEGE.color;
+    ctx.beginPath();
+    ctx.roundRect(slot.x, slot.y, slot.w, slot.h, 8);
+    ctx.fill();
+
+    const cx = slot.x + slot.w / 2;
+    const cy = slot.y - 12;
+    if (liegeStaffed) {
+      ctx.font = `${Math.max(12, slot.w * 0.3)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('👤', cx, slot.y + slot.h / 2 + 5);
+    } else if (l.dirty) {
+      ctx.font = `${Math.max(14, slot.w * 0.35)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('🗑️', cx, cy);
+    } else if (l.waiting) {
+      ctx.font = `${Math.max(14, slot.w * 0.35)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('🧍', cx, cy);
+    }
+  });
+
+  // Andere Stände
+  STAND_TYPES.forEach((item, i) => {
     if (!isOwned(item.id)) return;
-    const slot = getBeachSlotRect(i);
+    const slot = getStandSlotRect(i);
     ctx.fillStyle = item.color;
     ctx.beginPath();
     ctx.roundRect(slot.x, slot.y, slot.w, slot.h, 10);
