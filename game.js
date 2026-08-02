@@ -93,6 +93,23 @@ function checkWin() {
   }
 }
 
+// --- Kunden: kommen von selbst, man tippt sie an um Geld abzuholen ---
+const customers = {}; // id -> { waiting, nextSpawn }
+
+function randomDelay(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function ensureCustomerTimer(id, now) {
+  if (!customers[id]) {
+    customers[id] = { waiting: false, nextSpawn: now + randomDelay(1500, 3500) };
+  }
+}
+
+ITEM_TYPES.forEach((item) => {
+  if (isOwned(item.id) && !isStaffed(item.id)) ensureCustomerTimer(item.id, performance.now());
+});
+
 // --- Layout ---
 function getShopRect() {
   const h = canvas.height * 0.34;
@@ -145,15 +162,20 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
 
-  // Strand-Slots antippen (Geld verdienen, wenn nicht mit Personal besetzt)
+  // Strand-Slots antippen: Geld nur abholen, wenn ein Kunde da ist
   for (let i = 0; i < ITEM_TYPES.length; i++) {
     const item = ITEM_TYPES[i];
-    if (!isOwned(item.id)) continue;
+    if (!isOwned(item.id) || isStaffed(item.id)) continue;
     const slot = getBeachSlotRect(i);
-    if (pointInRect(px, py, slot) && !isStaffed(item.id)) {
-      state.money += item.tapIncome;
-      addPopup(slot.x + slot.w / 2, slot.y, `+${item.tapIncome}€`);
-      saveState();
+    if (pointInRect(px, py, slot)) {
+      const c = customers[item.id];
+      if (c && c.waiting) {
+        state.money += item.tapIncome;
+        c.waiting = false;
+        c.nextSpawn = performance.now() + randomDelay(2000, 5000);
+        addPopup(slot.x + slot.w / 2, slot.y, `+${item.tapIncome}€`);
+        saveState();
+      }
       return;
     }
   }
@@ -169,6 +191,7 @@ function handleShopTap(item) {
     if (state.money >= item.cost) {
       state.money -= item.cost;
       state.owned[item.id] = 1;
+      ensureCustomerTimer(item.id, performance.now());
       saveState();
     }
   } else if (!isStaffed(item.id)) {
@@ -201,6 +224,15 @@ function update(now) {
     if (earned) saveState();
   }
 
+  // Kunden kommen von selbst zu unbesetzten Ständen
+  for (const item of ITEM_TYPES) {
+    if (isOwned(item.id) && !isStaffed(item.id)) {
+      ensureCustomerTimer(item.id, now);
+      const c = customers[item.id];
+      if (!c.waiting && now >= c.nextSpawn) c.waiting = true;
+    }
+  }
+
   popups = popups.filter((p) => {
     p.y -= dt * 0.03;
     p.life -= dt / 800;
@@ -230,6 +262,21 @@ function draw() {
     if (isStaffed(item.id)) {
       ctx.font = `${Math.max(14, slot.w * 0.2)}px sans-serif`;
       ctx.fillText('👤', slot.x + slot.w / 2, slot.y + slot.h / 2 + 6);
+    } else {
+      const c = customers[item.id];
+      const cx = slot.x + slot.w / 2;
+      const cy = slot.y - 14;
+      if (c && c.waiting) {
+        ctx.font = `${Math.max(16, slot.w * 0.24)}px sans-serif`;
+        ctx.fillText('🧍💰', cx, cy);
+        ctx.fillStyle = '#1a2a3a';
+        ctx.font = `${Math.max(10, slot.w * 0.1)}px sans-serif`;
+        ctx.fillText('Abholen!', cx, cy + 16);
+      } else {
+        ctx.fillStyle = 'rgba(26, 42, 58, 0.5)';
+        ctx.font = `${Math.max(10, slot.w * 0.1)}px sans-serif`;
+        ctx.fillText('wartet auf Kunden…', cx, cy + 10);
+      }
     }
   });
 
