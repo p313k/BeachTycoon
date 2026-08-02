@@ -35,12 +35,12 @@ function pointInRect(px, py, rect) {
 
 // --- Die Sachen, die man kaufen kann ---
 const ITEM_TYPES = [
-  { id: 'liege', name: 'Liegestuhl', cost: 10, tapIncome: 1, staffCost: 50, staffIncome: 1, color: '#e8b04b' },
-  { id: 'schirm', name: 'Sonnenschirm', cost: 25, tapIncome: 2, staffCost: 100, staffIncome: 2, color: '#e05c5c' },
-  { id: 'eisstand', name: 'Eisstand', cost: 60, tapIncome: 4, staffCost: 200, staffIncome: 4, color: '#7ec8e3' },
-  { id: 'getraenke', name: 'Getränkebude', cost: 120, tapIncome: 7, staffCost: 400, staffIncome: 7, color: '#5cb85c' },
-  { id: 'snackbar', name: 'Snackbar', cost: 250, tapIncome: 12, staffCost: 800, staffIncome: 12, color: '#f0a500' },
-  { id: 'pool', name: 'Pool', cost: 500, tapIncome: 20, staffCost: 1500, staffIncome: 20, color: '#2e86ab' },
+  { id: 'liege', name: 'Liegestuhl', cost: 10, tapIncome: 1, staffCost: 300, staffIncome: 1, color: '#e8b04b' },
+  { id: 'schirm', name: 'Sonnenschirm', cost: 25, tapIncome: 2, staffCost: 600, staffIncome: 2, color: '#e05c5c' },
+  { id: 'eisstand', name: 'Eisstand', cost: 60, tapIncome: 4, staffCost: 1200, staffIncome: 4, color: '#7ec8e3' },
+  { id: 'getraenke', name: 'Getränkebude', cost: 120, tapIncome: 7, staffCost: 2500, staffIncome: 7, color: '#5cb85c' },
+  { id: 'snackbar', name: 'Snackbar', cost: 250, tapIncome: 12, staffCost: 5000, staffIncome: 12, color: '#f0a500' },
+  { id: 'pool', name: 'Pool', cost: 500, tapIncome: 20, staffCost: 10000, staffIncome: 20, color: '#2e86ab' },
 ];
 
 const SAVE_KEY = 'beachTycoonSave';
