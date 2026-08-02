@@ -348,6 +348,63 @@ function cleanNearbyLoungers() {
   });
 }
 
+// --- Liegen-Personal: eine sichtbare Person, die von Liege zu Liege läuft ---
+const liegeStaff = { x: null, y: null, targetIndex: null, speed: 180 };
+
+function findLoungerNeedingAttention() {
+  for (let i = 0; i < loungers.length; i++) {
+    if (loungers[i].waiting || loungers[i].dirty) return i;
+  }
+  return -1;
+}
+
+function updateLiegeStaff(dt) {
+  if (liegeStaff.x === null) {
+    const first = getLoungerRect(0);
+    liegeStaff.x = first.x + first.w / 2;
+    liegeStaff.y = first.y + first.h / 2;
+  }
+
+  const targetStillValid =
+    liegeStaff.targetIndex !== null &&
+    (loungers[liegeStaff.targetIndex].waiting || loungers[liegeStaff.targetIndex].dirty);
+
+  if (!targetStillValid) {
+    const found = findLoungerNeedingAttention();
+    liegeStaff.targetIndex = found === -1 ? null : found;
+  }
+
+  if (liegeStaff.targetIndex === null) return;
+
+  const slot = getLoungerRect(liegeStaff.targetIndex);
+  const tx = slot.x + slot.w / 2;
+  const ty = slot.y + slot.h / 2;
+  const dx = tx - liegeStaff.x;
+  const dy = ty - liegeStaff.y;
+  const dist = Math.hypot(dx, dy);
+  const step = liegeStaff.speed * (dt / 1000);
+
+  if (dist <= step || dist === 0) {
+    liegeStaff.x = tx;
+    liegeStaff.y = ty;
+    const l = loungers[liegeStaff.targetIndex];
+    if (l.waiting) {
+      state.money += LIEGE.staffIncome;
+      l.waiting = false;
+      addPopup(tx, slot.y - 10, `+${LIEGE.staffIncome}€`);
+      saveState();
+    } else if (l.dirty) {
+      l.dirty = false;
+      addPopup(tx, slot.y - 10, '🧹');
+    }
+    l.nextSpawn = performance.now() + randomDelay(1000, 9000);
+    liegeStaff.targetIndex = null;
+  } else {
+    liegeStaff.x += (dx / dist) * step;
+    liegeStaff.y += (dy / dist) * step;
+  }
+}
+
 // --- Eingabe ---
 canvas.addEventListener('pointerdown', (e) => {
   const rect = canvas.getBoundingClientRect();
@@ -413,7 +470,7 @@ function update(now) {
   if (now - lastStaffTick >= STAFF_TICK_MS) {
     lastStaffTick = now;
     let earned = false;
-    for (const item of ITEM_TYPES) {
+    for (const item of STAND_TYPES) {
       if (isOwned(item.id) && isStaffed(item.id)) {
         state.money += item.staffIncome;
         earned = true;
@@ -432,16 +489,15 @@ function update(now) {
   }
 
   // Kunden kommen von selbst zu sauberen, freien Liegen (nicht zu eingemüllten)
-  if (!isStaffed('liege')) {
-    for (const l of loungers) {
-      if (!l.dirty && !l.waiting && now >= l.nextSpawn) l.waiting = true;
-    }
+  for (const l of loungers) {
+    if (!l.dirty && !l.waiting && now >= l.nextSpawn) l.waiting = true;
   }
 
   updatePlayer(dt);
   collectNearbyCustomers();
   collectNearbyLoungers();
   cleanNearbyLoungers();
+  if (isStaffed('liege')) updateLiegeStaff(dt);
 
   popups = popups.filter((p) => {
     p.y -= dt * 0.03;
@@ -458,7 +514,6 @@ function draw() {
   ctx.fillRect(0, 0, canvas.width, 40);
 
   // Liegen (10 Stück)
-  const liegeStaffed = isStaffed('liege');
   loungers.forEach((l, i) => {
     const slot = getLoungerRect(i);
     ctx.fillStyle = l.dirty ? '#8a7455' : LIEGE.color;
@@ -468,11 +523,7 @@ function draw() {
 
     const cx = slot.x + slot.w / 2;
     const cy = slot.y - 12;
-    if (liegeStaffed) {
-      ctx.font = `${Math.max(12, slot.w * 0.3)}px sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.fillText('👤', cx, slot.y + slot.h / 2 + 5);
-    } else if (l.dirty) {
+    if (l.dirty) {
       ctx.font = `${Math.max(14, slot.w * 0.35)}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.fillText('🗑️', cx, cy);
@@ -482,6 +533,17 @@ function draw() {
       ctx.fillText('🧍', cx, cy);
     }
   });
+
+  // Liegen-Personal (eine Person, läuft sichtbar herum)
+  if (isStaffed('liege') && liegeStaff.x !== null) {
+    ctx.textAlign = 'center';
+    ctx.beginPath();
+    ctx.ellipse(liegeStaff.x, liegeStaff.y + 14, 14, 5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+    ctx.fill();
+    ctx.font = '30px sans-serif';
+    ctx.fillText('👷', liegeStaff.x, liegeStaff.y + 8);
+  }
 
   // Andere Stände
   STAND_TYPES.forEach((item, i) => {
