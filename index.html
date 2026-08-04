@@ -118,10 +118,7 @@ const START_LOUNGER_COUNT = 4; // so klein fängt ein neuer Strand an
 const MAX_LOUNGER_COUNT = 24; // mehr passt nicht an den Strand
 const LOUNGER_COST_BASE = 120; // Preis für die erste zusätzliche Liege
 const LOUNGER_COST_GROWTH = 1.2; // jede weitere Liege wird teurer
-const DAY_DURATION_MS = 3 * 60 * 1000; // ein Spieltag = 3 echte Minuten (Zeitraffer 08:00-20:00)
-// Kunden kommen im Verhältnis zum Tag, damit der Strand nicht die halbe Zeit leer steht
-const SPAWN_MIN_MS = DAY_DURATION_MS * 0.02; // ab ca. 3,5 Sekunden nach Tagesbeginn
-const SPAWN_MAX_MS = DAY_DURATION_MS * 0.15; // spätestens nach ca. 27 Sekunden
+const SEASON_DURATION_MS = 30 * 60 * 1000; // eine ganze Season (Juni bis August) = 30 echte Minuten
 const BASE_BOOKING_PRICE = 12; // eine Liege für den ganzen Tag buchen
 const TRASH_CHANCE = 0.25; // Chance, dass eine Liege nach dem Tag Müll hinterlässt
 const STAFF_COST = 600; // Personal kümmert sich automatisch um alle Liegen
@@ -142,6 +139,12 @@ const SEASON_MONTHS = [
   { name: 'August', days: 31 },
 ];
 const SEASON_LENGTH = SEASON_MONTHS.reduce((sum, m) => sum + m.days, 0); // 92 Tage
+
+// 92 Tage in 30 Minuten -> ein Spieltag dauert knapp 20 Sekunden
+const DAY_DURATION_MS = SEASON_DURATION_MS / SEASON_LENGTH;
+// Kunden kommen im Verhältnis zum Tag, damit der Strand nicht die halbe Zeit leer steht
+const SPAWN_MIN_MS = DAY_DURATION_MS * 0.05;
+const SPAWN_MAX_MS = DAY_DURATION_MS * 0.35;
 
 function getDateLabel(dayOfSeason) {
   let remaining = dayOfSeason;
@@ -206,6 +209,7 @@ function loadState() {
 const state = loadState();
 let popups = []; // fliegende "+N€" Texte
 let dayEnded = false;
+let dayBanner = null; // kurze Einblendung beim automatischen Tageswechsel
 let dayEarningsBase = state.money; // Geldstand zu Beginn des Tages, um "heute verdient" zu zeigen
 let selectedLounger = null; // Index der Liege, deren Ausbau-Panel offen ist
 
@@ -275,10 +279,17 @@ function dayProgress() {
   return Math.min(1, Math.max(0, (Date.now() - state.dayStartTime) / DAY_DURATION_MS));
 }
 
+// Bei knapp 20 Sekunden pro Tag wäre ein Knopf nach jedem Tag 92-mal pro Season fällig:
+// der Tag läuft deshalb von selbst weiter und zeigt die Abrechnung nur kurz ein.
+// Nur das Season-Ende hält das Spiel an.
 function checkDayEnd() {
-  if (!dayEnded && dayProgress() >= 1) {
+  if (dayEnded || dayProgress() < 1) return;
+  if (isLastDayOfSeason()) {
     dayEnded = true;
+    return;
   }
+  dayBanner = { text: `${getDateLabel(state.day)}: +${state.money - dayEarningsBase}€`, life: 1 };
+  startNextDay();
 }
 
 function startNextDay() {
@@ -770,6 +781,11 @@ function update(now) {
     p.life -= dt / 800;
     return p.life > 0;
   });
+
+  if (dayBanner) {
+    dayBanner.life -= dt / 2500; // gut zwei Sekunden sichtbar
+    if (dayBanner.life <= 0) dayBanner = null;
+  }
 }
 
 function draw() {
@@ -982,6 +998,23 @@ function draw() {
     ctx.font = `${Math.max(11, Math.min(15, hintW * 0.075))}px sans-serif`;
     ctx.fillText('Tippe eine freie Liege an,', hintLeft + hintW / 2, shop.y + shop.h / 2 - 4);
     ctx.fillText('um sie auszubauen', hintLeft + hintW / 2, shop.y + shop.h / 2 + 18);
+  }
+
+  // Kurze Tagesabrechnung beim automatischen Wechsel
+  if (dayBanner) {
+    ctx.globalAlpha = Math.min(1, dayBanner.life * 2.5); // die letzte Sekunde ausblenden
+    ctx.font = 'bold 19px sans-serif';
+    ctx.textAlign = 'center';
+    const bw = ctx.measureText(dayBanner.text).width + 36;
+    const bx = canvas.width / 2 - bw / 2;
+    const by = getTopBarRect().h + 10;
+    ctx.fillStyle = 'rgba(18, 50, 74, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, 38, 10);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(dayBanner.text, canvas.width / 2, by + 25);
+    ctx.globalAlpha = 1;
   }
 
   // Neu-starten-Button
