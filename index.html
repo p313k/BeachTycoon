@@ -643,7 +643,8 @@ void main() {
   float diffus = max(dot(n, uLightDir), 0.0);
   // etwas Aufhellung von unten, damit Schattenseiten nicht absaufen
   float fuell = max(-n.y, 0.0) * 0.12;
-  vec3 c = uColor * uLightColor * (uAmbient + diffus * 0.8 + fuell);
+  // Summe bleibt knapp unter 1, sonst brennt der Sand mittags weiß aus
+  vec3 c = uColor * uLightColor * (uAmbient + diffus * 0.52 + fuell);
   gl_FragColor = vec4(c, 1.0);
 }`;
 
@@ -929,7 +930,7 @@ const DREH_SPEED = 2.1; // Bogenmaß pro Sekunde beim Drehen mit dem Steuerkreuz
 
 // --- Tastatur (W/A/S/D oder Pfeiltasten) ---
 const pressedKeys = new Set();
-const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+const MOVE_KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
 window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   if (MOVE_KEYS.includes(key)) e.preventDefault();
@@ -949,6 +950,11 @@ function keyboardDirection() {
   return { dx, dz };
 }
 
+// Q und E drehen in der Ich-Perspektive, für alle ohne Maus zum Wischen
+function drehTaste() {
+  return (pressedKeys.has('e') ? 1 : 0) - (pressedKeys.has('q') ? 1 : 0);
+}
+
 // --- Bedienleiste unten (2D über der 3D-Ansicht) ---
 function getTopBarRect() {
   return { x: 0, y: 0, w: hud.width, h: 64 };
@@ -959,14 +965,17 @@ function getShopRect() {
   return { x: 0, y: hud.height - h, w: hud.width, h };
 }
 
-function getDpadSize() {
+// Steuerkreis unten links: Knopf in eine Richtung ziehen, dahin läuft die Figur
+function getStickRect() {
   const shop = getShopRect();
-  return Math.min(56, (shop.h - 20) / 3);
+  const radius = Math.min(78, (shop.h - 24) / 2);
+  return { cx: shop.x + 16 + radius, cy: shop.y + shop.h / 2, radius };
 }
 
 function getShopContentRect() {
   const shop = getShopRect();
-  const left = shop.x + getDpadSize() * 3 + 20;
+  const stick = getStickRect();
+  const left = stick.cx + stick.radius + 16;
   return { x: left, y: shop.y, w: shop.w - left, h: shop.h };
 }
 
@@ -1015,53 +1024,58 @@ function getNextDayButtonRect() {
   return { x: hud.width / 2 - 170, y: hud.height / 2 + 30, w: 340, h: 50 };
 }
 
-// --- Steuerkreuz (Touch) ---
-let dpadDirection = null;
-let dpadPointerId = null;
+// --- Steuerkreis (Touch): der Knopf folgt dem Finger, die Figur läuft dorthin ---
+const stick = { aktiv: false, pointerId: null, x: 0, y: 0 }; // x/y sind -1 bis 1
 
-function getDpadRects() {
-  const shop = getShopRect();
-  const size = getDpadSize();
-  const gap = 2;
-  const cx = 10 + size * 1.5;
-  const cy = shop.y + shop.h / 2;
-  return {
-    up: { key: 'up', dx: 0, dz: -1, symbol: '▲', x: cx - size / 2, y: cy - size - gap, w: size, h: size },
-    down: { key: 'down', dx: 0, dz: 1, symbol: '▼', x: cx - size / 2, y: cy + gap, w: size, h: size },
-    left: { key: 'left', dx: -1, dz: 0, symbol: '◀', x: cx - size - gap, y: cy - size / 2, w: size, h: size },
-    right: { key: 'right', dx: 1, dz: 0, symbol: '▶', x: cx + gap, y: cy - size / 2, w: size, h: size },
-  };
+function stickGreifen(px, py) {
+  const s = getStickRect();
+  // etwas großzügiger als der sichtbare Kreis, damit man ihn sicher erwischt
+  return Math.hypot(px - s.cx, py - s.cy) <= s.radius * 1.25;
 }
 
-function hitDpad(px, py) {
-  const rects = getDpadRects();
-  for (const key of Object.keys(rects)) {
-    if (pointInRect(px, py, rects[key])) return rects[key];
+function stickSetzen(px, py) {
+  const s = getStickRect();
+  const dx = px - s.cx;
+  const dy = py - s.cy;
+  const laenge = Math.hypot(dx, dy);
+  const grenze = s.radius;
+  if (laenge <= 0.0001) {
+    stick.x = 0;
+    stick.y = 0;
+    return;
   }
-  return null;
+  const anteil = Math.min(1, laenge / grenze);
+  stick.x = (dx / laenge) * anteil;
+  stick.y = (dy / laenge) * anteil;
 }
 
-function releaseDpad(e) {
-  if (e.pointerId === dpadPointerId) {
-    dpadDirection = null;
-    dpadPointerId = null;
-  }
+function stickLoslassen() {
+  stick.aktiv = false;
+  stick.pointerId = null;
+  stick.x = 0;
+  stick.y = 0;
 }
-hud.addEventListener('pointerup', releaseDpad);
-hud.addEventListener('pointercancel', releaseDpad);
-hud.addEventListener('pointerleave', releaseDpad);
 
+// Richtung auf dem Bildschirm: x nach rechts, y nach unten, Länge = wie weit gezogen
 function getInputDirection() {
-  let dx = 0;
-  let dz = 0;
   const kb = keyboardDirection();
-  dx += kb.dx;
-  dz += kb.dz;
-  if (dpadDirection) {
-    dx += dpadDirection.dx;
-    dz += dpadDirection.dz;
+  let x = kb.dx;
+  let y = kb.dz;
+  const laenge = Math.hypot(x, y);
+  if (laenge > 1) {
+    x /= laenge;
+    y /= laenge;
   }
-  return { dx, dz };
+  if (stick.aktiv) {
+    x += stick.x;
+    y += stick.y;
+  }
+  const gesamt = Math.hypot(x, y);
+  if (gesamt > 1) {
+    x /= gesamt;
+    y /= gesamt;
+  }
+  return { x, y, staerke: Math.min(1, gesamt) };
 }
 
 // Liegen sind fest: die Figur wird aus ihnen herausgeschoben, statt hindurchzulaufen.
@@ -1095,40 +1109,49 @@ function beachBounds() {
 }
 
 function updatePlayer(dt) {
-  const step = player.speed * (dt / 1000);
   const b = beachBounds();
-  const { dx, dz } = getInputDirection();
+  const { x: ix, y: iy, staerke } = getInputDirection();
+  const vollerSchritt = player.speed * (dt / 1000);
+  const step = vollerSchritt * staerke; // je weiter der Stick gezogen ist, desto schneller
   let bewegt = false;
 
-  if (istEgoSicht() && (dx !== 0 || dz !== 0)) {
-    // Ich-Perspektive: links/rechts dreht, vor/zurück läuft in Blickrichtung
-    if (dx !== 0) player.blick -= dx * DREH_SPEED * (dt / 1000);
-    if (dz !== 0) {
-      const vor = -dz; // "oben" heißt vorwärts
-      player.x += Math.sin(player.blick) * vor * step;
-      player.z += Math.cos(player.blick) * vor * step;
-      bewegt = true;
-    }
+  // Drehen mit der Tastatur, falls jemand ohne Wischen auskommen muss
+  if (istEgoSicht() && drehTaste() !== 0) {
+    player.blick -= drehTaste() * DREH_SPEED * (dt / 1000);
     player.targetX = player.x;
     player.targetZ = player.z;
-  } else if (dx !== 0 || dz !== 0) {
-    const len = Math.hypot(dx, dz);
-    player.x += (dx / len) * step;
-    player.z += (dz / len) * step;
-    player.blick = Math.atan2(dx, dz);
+  }
+
+  if (istEgoSicht() && staerke > 0.02) {
+    // Ich-Perspektive: nach oben ziehen heißt vorwärts, zur Seite heißt seitwärts
+    const vor = -iy;
+    const seit = ix;
+    const rechtsX = -Math.cos(player.blick); // Rechts-Richtung der Kamera
+    const rechtsZ = Math.sin(player.blick);
+    player.x += (Math.sin(player.blick) * vor + rechtsX * seit) * step;
+    player.z += (Math.cos(player.blick) * vor + rechtsZ * seit) * step;
+    player.targetX = player.x;
+    player.targetZ = player.z;
+    bewegt = true;
+  } else if (!istEgoSicht() && staerke > 0.02) {
+    // Übersicht: die Figur läuft in die Richtung, in die gezogen wird
+    player.x += ix * step;
+    player.z += iy * step;
+    player.blick = Math.atan2(ix, iy);
     player.targetX = player.x;
     player.targetZ = player.z;
     bewegt = true;
   } else {
+    // Ohne Stick: zum angetippten Punkt laufen, mit voller Geschwindigkeit
     const tx = player.targetX - player.x;
     const tz = player.targetZ - player.z;
     const dist = Math.hypot(tx, tz);
-    if (dist <= step || dist === 0) {
+    if (dist <= vollerSchritt || dist === 0) {
       player.x = player.targetX;
       player.z = player.targetZ;
     } else {
-      player.x += (tx / dist) * step;
-      player.z += (tz / dist) * step;
+      player.x += (tx / dist) * vollerSchritt;
+      player.z += (tz / dist) * vollerSchritt;
       player.blick = Math.atan2(tx, tz);
       bewegt = true;
     }
@@ -1317,10 +1340,11 @@ hud.addEventListener('pointerdown', (e) => {
     }
   }
 
-  const dpadHit = hitDpad(px, py);
-  if (dpadHit) {
-    dpadDirection = dpadHit;
-    dpadPointerId = e.pointerId;
+  // Steuerkreis greifen
+  if (!stick.aktiv && stickGreifen(px, py)) {
+    stick.aktiv = true;
+    stick.pointerId = e.pointerId;
+    stickSetzen(px, py);
     return;
   }
 
@@ -1334,6 +1358,11 @@ let blickGeste = null;
 const WISCH_SCHWELLE = 10; // ab so vielen Pixeln gilt es als Wischen, nicht als Tippen
 
 hud.addEventListener('pointermove', (e) => {
+  if (stick.aktiv && e.pointerId === stick.pointerId) {
+    const r = hud.getBoundingClientRect();
+    stickSetzen(e.clientX - r.left, e.clientY - r.top);
+    return;
+  }
   if (!blickGeste || e.pointerId !== blickGeste.id) return;
   const rect = hud.getBoundingClientRect();
   const dx = e.clientX - rect.left - blickGeste.x0;
@@ -1349,6 +1378,10 @@ hud.addEventListener('pointermove', (e) => {
 });
 
 hud.addEventListener('pointerup', (e) => {
+  if (stick.aktiv && e.pointerId === stick.pointerId) {
+    stickLoslassen();
+    return;
+  }
   if (!blickGeste || e.pointerId !== blickGeste.id) return;
   const geste = blickGeste;
   blickGeste = null;
@@ -1370,9 +1403,12 @@ hud.addEventListener('pointerup', (e) => {
   player.targetZ = Math.min(Math.max(ground.z, b.zMin), b.zMax);
 });
 
-hud.addEventListener('pointercancel', (e) => {
+function gesteAbbrechen(e) {
+  if (stick.aktiv && e.pointerId === stick.pointerId) stickLoslassen();
   if (blickGeste && e.pointerId === blickGeste.id) blickGeste = null;
-});
+}
+hud.addEventListener('pointercancel', gesteAbbrechen);
+hud.addEventListener('pointerleave', gesteAbbrechen);
 
 // --- Spielschleife ---
 let lastFrame = performance.now();
@@ -1420,7 +1456,7 @@ function drawScene() {
   gl.useProgram(program);
   gl.uniform3fv(uniLightDir, getSunDirection());
   gl.uniform3fv(uniLightColor, getLightColor());
-  gl.uniform1f(uniAmbient, 0.55);
+  gl.uniform1f(uniAmbient, 0.5);
 
   drawBeach();
   for (let i = 0; i < loungers.length; i++) drawLounger(i);
@@ -1500,17 +1536,35 @@ function drawHud() {
   ctx.fillStyle = '#12324a';
   ctx.fillRect(shop.x, shop.y, shop.w, shop.h);
 
-  Object.values(getDpadRects()).forEach((r) => {
-    const active = dpadDirection && dpadDirection.key === r.key;
-    ctx.fillStyle = active ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.35)';
-    ctx.beginPath();
-    ctx.roundRect(r.x, r.y, r.w, r.h, 10);
-    ctx.fill();
-    ctx.fillStyle = '#12324a';
-    ctx.font = `bold ${Math.max(14, r.h * 0.4)}px sans-serif`;
+  // Steuerkreis: äußerer Ring plus Knopf, der dem Finger folgt
+  const s = getStickRect();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, s.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Pfeilandeutung in vier Richtungen, solange der Kreis unberührt ist
+  if (!stick.aktiv) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.font = `${Math.max(11, s.radius * 0.22)}px sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText(r.symbol, r.x + r.w / 2, r.y + r.h / 2 + r.h * 0.15);
-  });
+    const r = s.radius * 0.7;
+    ctx.fillText('▲', s.cx, s.cy - r + 5);
+    ctx.fillText('▼', s.cx, s.cy + r + 5);
+    ctx.fillText('◀', s.cx - r, s.cy + 5);
+    ctx.fillText('▶', s.cx + r, s.cy + 5);
+  }
+
+  const knopfR = s.radius * 0.42;
+  const kx = s.cx + stick.x * (s.radius - knopfR);
+  const ky = s.cy + stick.y * (s.radius - knopfR);
+  ctx.fillStyle = stick.aktiv ? 'rgba(255, 255, 255, 0.92)' : 'rgba(255, 255, 255, 0.55)';
+  ctx.beginPath();
+  ctx.arc(kx, ky, knopfR, 0, Math.PI * 2);
+  ctx.fill();
 
   if (selectedLounger !== null) {
     const u = state.loungerUpgrades[selectedLounger];
