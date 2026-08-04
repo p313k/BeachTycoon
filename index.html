@@ -118,7 +118,10 @@ const START_LOUNGER_COUNT = 4; // so klein fängt ein neuer Strand an
 const MAX_LOUNGER_COUNT = 24; // mehr passt nicht an den Strand
 const LOUNGER_COST_BASE = 120; // Preis für die erste zusätzliche Liege
 const LOUNGER_COST_GROWTH = 1.2; // jede weitere Liege wird teurer
-const DAY_DURATION_MS = 30 * 60 * 1000; // eine Season = ein Tag = 30 echte Minuten (Zeitraffer)
+const DAY_DURATION_MS = 3 * 60 * 1000; // ein Spieltag = 3 echte Minuten (Zeitraffer 08:00-20:00)
+// Kunden kommen im Verhältnis zum Tag, damit der Strand nicht die halbe Zeit leer steht
+const SPAWN_MIN_MS = DAY_DURATION_MS * 0.02; // ab ca. 3,5 Sekunden nach Tagesbeginn
+const SPAWN_MAX_MS = DAY_DURATION_MS * 0.15; // spätestens nach ca. 27 Sekunden
 const BASE_BOOKING_PRICE = 12; // eine Liege für den ganzen Tag buchen
 const TRASH_CHANCE = 0.25; // Chance, dass eine Liege nach dem Tag Müll hinterlässt
 const STAFF_COST = 600; // Personal kümmert sich automatisch um alle Liegen
@@ -240,7 +243,7 @@ function makeLounger() {
     waiting: false,
     booked: false,
     dirty: false,
-    nextSpawn: performance.now() + randomDelay(5000, 60000),
+    nextSpawn: performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS),
   };
 }
 
@@ -296,7 +299,7 @@ function startNextDay() {
       l.dirty = Math.random() < TRASH_CHANCE;
     }
     l.waiting = false;
-    l.nextSpawn = performance.now() + randomDelay(5000, 60000);
+    l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
   });
   saveState();
 }
@@ -565,7 +568,7 @@ function cleanNearbyLoungers() {
     const radius = Math.max(slot.w, slot.h) * 0.8;
     if (Math.hypot(player.x - cx, player.y - cy) <= radius) {
       l.dirty = false;
-      l.nextSpawn = performance.now() + randomDelay(5000, 60000);
+      l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
       addPopup(cx, slot.y - 10, '🧹 sauber!');
     }
   });
@@ -621,7 +624,7 @@ function updateLiegeStaff(dt) {
       saveState();
     } else if (l.dirty) {
       l.dirty = false;
-      l.nextSpawn = performance.now() + randomDelay(5000, 60000);
+      l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
       addPopup(tx, slot.y - 10, '🧹');
     }
     liegeStaff.targetIndex = null;
