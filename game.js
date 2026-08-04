@@ -18,7 +18,10 @@ if (window.visualViewport) {
 }
 resize();
 
-// --- Cookie-Speicher fürs Spiel (kein Server, alles lokal) ---
+// --- Spielstand-Speicher (kein Server, alles lokal im Gerät) ---
+// localStorage zuerst: funktioniert auch, wenn die Datei direkt geöffnet wird,
+// und überlebt in Safari länger als ein per Skript gesetztes Cookie (dort nur 7 Tage).
+// Cookie bleibt als Rückfall und um alte Spielstände zu übernehmen.
 function setCookie(name, value, days) {
   const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
   document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/`;
@@ -27,6 +30,43 @@ function setCookie(name, value, days) {
 function getCookie(name) {
   const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
   return match ? decodeURIComponent(match[2]) : null;
+}
+
+const hasLocalStorage = (() => {
+  try {
+    localStorage.setItem('__test__', '1');
+    localStorage.removeItem('__test__');
+    return true;
+  } catch (e) {
+    return false;
+  }
+})();
+
+function readSave(key) {
+  if (hasLocalStorage) {
+    const stored = localStorage.getItem(key);
+    if (stored !== null) return stored;
+  }
+  return getCookie(key); // Spielstand aus der Cookie-Zeit
+}
+
+function writeSave(key, value) {
+  if (hasLocalStorage) {
+    try {
+      localStorage.setItem(key, value);
+      return;
+    } catch (e) {} // z.B. Speicher voll -> unten aufs Cookie ausweichen
+  }
+  setCookie(key, value, 365);
+}
+
+function clearSave(key) {
+  if (hasLocalStorage) {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {}
+  }
+  setCookie(key, '', -1);
 }
 
 function pointInRect(px, py, rect) {
@@ -100,7 +140,7 @@ function normalizeUpgrades(list) {
 
 function loadState() {
   try {
-    const raw = getCookie(SAVE_KEY);
+    const raw = readSave(SAVE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
@@ -132,7 +172,7 @@ let dayEarningsBase = state.money; // Geldstand zu Beginn des Tages, um "heute v
 let selectedLounger = null; // Index der Liege, deren Ausbau-Panel offen ist
 
 function saveState() {
-  setCookie(
+  writeSave(
     SAVE_KEY,
     JSON.stringify({
       money: state.money,
@@ -142,8 +182,7 @@ function saveState() {
       dayStartTime: state.dayStartTime,
       staffed: state.staffed,
       loungerUpgrades: state.loungerUpgrades,
-    }),
-    365
+    })
   );
 }
 
@@ -567,6 +606,7 @@ function resetGame() {
   state.dayStartTime = Date.now();
   state.staffed = false;
   state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
+  clearSave(SAVE_KEY); // löscht auch ein altes Cookie, sonst käme der Spielstand zurück
   saveState();
   location.reload();
 }
