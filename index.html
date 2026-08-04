@@ -212,6 +212,7 @@ function loadState() {
         seasonStartMoney: parsed.seasonStartMoney || 0,
         dayStartTime: parsed.dayStartTime || Date.now(),
         staffed: parsed.staffed === true,
+        view: parsed.view === 'ueber' ? 'ueber' : 'ego',
         loungerUpgrades: normalizeUpgrades(parsed.loungerUpgrades),
       };
     }
@@ -223,8 +224,13 @@ function loadState() {
     seasonStartMoney: 0,
     dayStartTime: Date.now(),
     staffed: false,
+    view: 'ego', // Ich-Perspektive, umschaltbar auf 'ueber' (Blick über den ganzen Strand)
     loungerUpgrades: defaultUpgrades(START_LOUNGER_COUNT),
   };
+}
+
+function istEgoSicht() {
+  return state.view === 'ego';
 }
 
 const state = loadState();
@@ -244,6 +250,7 @@ function saveState() {
       seasonStartMoney: state.seasonStartMoney,
       dayStartTime: state.dayStartTime,
       staffed: state.staffed,
+      view: state.view,
       loungerUpgrades: state.loungerUpgrades,
     })
   );
@@ -539,7 +546,29 @@ function mat4Invert(m) {
 let viewProj = mat4Identity();
 let cameraEye = [0, 10, 14];
 
+const AUGENHOEHE = 1.62; // Kamerahöhe in der Ich-Perspektive
+
 function updateCamera() {
+  const bandMitteEgo = (getTopBarRect().h + (hud.height - getShopRect().h)) / 2;
+  const versatzEgo = 1 - (2 * bandMitteEgo) / hud.height;
+  const aspectEgo = sceneCanvas.width / Math.max(1, sceneCanvas.height);
+
+  if (istEgoSicht()) {
+    // Kamera sitzt im Kopf der Spielfigur und schaut in Blickrichtung.
+    // Beim Gehen wippt sie leicht, im Stehen steht sie still.
+    const wippen = player.schritt > 0 ? Math.sin(player.schritt * 2.2) * 0.045 : 0;
+    cameraEye = [player.x, AUGENHOEHE + wippen, player.z];
+    const sicht = Math.tan(player.neigung);
+    const target = [
+      cameraEye[0] + Math.sin(player.blick) * 4,
+      cameraEye[1] + sicht * 4,
+      cameraEye[2] + Math.cos(player.blick) * 4,
+    ];
+    const projEgo = mat4Perspective((62 * Math.PI) / 180, aspectEgo, 0.15, 600, versatzEgo);
+    viewProj = mat4Multiply(projEgo, mat4LookAt(cameraEye, target, [0, 1, 0]));
+    return;
+  }
+
   const g = getGrid();
   const radius = Math.max(g.width, g.depth) / 2;
   // Fester Neigungswinkel: flach genug, dass Meer und Himmel im Bild bleiben,
@@ -752,6 +781,7 @@ const COL = {
   schatten: [0.78, 0.68, 0.5],
   meer: [0.18, 0.55, 0.72],
   schaum: [0.85, 0.93, 0.95],
+  sonne: [2.6, 2.4, 1.6], // über 1, damit die Sonne unabhängig vom Lichteinfall hell bleibt
   liege: [0.93, 0.72, 0.28],
   liegeSchmutzig: [0.55, 0.47, 0.35],
   gestell: [0.85, 0.85, 0.88],
@@ -866,9 +896,21 @@ function drawBeach() {
   box([0, -0.35, kante - 220], [900, 0.5, 440], COL.meer, 0, 0);
   // Sand: reicht seitlich und nach vorn weit über das Bild hinaus
   box([0, -0.2, kante + 200], [900, 0.42, 400], COL.sand, 0, 0);
-  // Uferkante mit nassem Sand und Schaumsaum
+  // Uferkante mit nassem Sand und Schaumsaum, der in der Brandung vor und zurück läuft
+  const brandung = Math.sin(zeitMs * 0.0007) * 0.5;
   box([0, -0.17, kante + 0.8], [900, 0.4, 1.8], COL.sandDunkel, 0, 0);
-  box([0, -0.15, kante - 0.5], [900, 0.38, 1.0], COL.schaum, 0, 0);
+  box([0, -0.15, kante - 0.4 + brandung], [900, 0.38, 1.1], COL.schaum, 0, 0);
+  box([0, -0.16, kante - 3.2 - brandung * 0.7], [900, 0.36, 0.5], COL.schaum, 0, 0);
+
+  // Sonne am Himmel, wandert mit dem Tag; überstrahlt bewusst die Beleuchtung
+  const sonne = getSunDirection();
+  box(
+    [cameraEye[0] + sonne[0] * 260, sonne[1] * 260, cameraEye[2] + sonne[2] * 260],
+    [26, 26, 26],
+    COL.sonne,
+    0,
+    0
+  );
 }
 
 // --- Spielfigur ---
@@ -879,9 +921,11 @@ const player = {
   targetX: -getGrid().width / 2 - 1.2,
   targetZ: getGrid().depth / 2 + 1.4,
   speed: 6.2, // Einheiten pro Sekunde
-  blick: Math.PI,
+  blick: Math.PI, // Drehung um die Hochachse
+  neigung: -0.14, // Blick leicht nach unten, damit der Sand vorn im Bild ist
   schritt: 0,
 };
+const DREH_SPEED = 2.1; // Bogenmaß pro Sekunde beim Drehen mit dem Steuerkreuz
 
 // --- Tastatur (W/A/S/D oder Pfeiltasten) ---
 const pressedKeys = new Set();
@@ -928,6 +972,11 @@ function getShopContentRect() {
 
 function getResetButtonRect() {
   return { x: hud.width - 132, y: 18, w: 120, h: 28 };
+}
+
+function getViewButtonRect() {
+  const reset = getResetButtonRect();
+  return { x: reset.x - 134, y: 18, w: 126, h: 28 };
 }
 
 function getPersonalButtonRect() {
@@ -1015,6 +1064,31 @@ function getInputDirection() {
   return { dx, dz };
 }
 
+// Liegen sind fest: die Figur wird aus ihnen herausgeschoben, statt hindurchzulaufen.
+// Wichtig in der Ich-Perspektive, sonst steht die Kamera in einer Matratze.
+function schiebeAusLiegen(pos) {
+  for (let i = 0; i < loungers.length; i++) {
+    const w = loungerWorld(i);
+    const breite = state.loungerUpgrades[i].doppel ? LOUNGER_W * 1.75 : LOUNGER_W;
+    // eng am Möbel bleiben: bei 2,6 m Reihenabstand muss zwischen den Reihen
+    // eine Gasse frei bleiben, sonst kommt man nirgendwo mehr durch
+    const halbX = breite / 2 + 0.22;
+    const halbZ = 1.05;
+    const dx = pos.x - w.x;
+    const dz = pos.z - w.z;
+    const durchdringungX = halbX - Math.abs(dx);
+    const durchdringungZ = halbZ - Math.abs(dz);
+    if (durchdringungX <= 0 || durchdringungZ <= 0) continue;
+    // an der Seite hinausschieben, die am nächsten liegt
+    if (durchdringungX < durchdringungZ) {
+      pos.x = w.x + Math.sign(dx || 1) * halbX;
+    } else {
+      pos.z = w.z + Math.sign(dz || 1) * halbZ;
+    }
+  }
+  return pos;
+}
+
 function beachBounds() {
   const g = getGrid();
   return { x: g.width / 2 + 3.5, zMin: -g.depth / 2 - 3.5, zMax: g.depth / 2 + 4.5 };
@@ -1026,7 +1100,18 @@ function updatePlayer(dt) {
   const { dx, dz } = getInputDirection();
   let bewegt = false;
 
-  if (dx !== 0 || dz !== 0) {
+  if (istEgoSicht() && (dx !== 0 || dz !== 0)) {
+    // Ich-Perspektive: links/rechts dreht, vor/zurück läuft in Blickrichtung
+    if (dx !== 0) player.blick -= dx * DREH_SPEED * (dt / 1000);
+    if (dz !== 0) {
+      const vor = -dz; // "oben" heißt vorwärts
+      player.x += Math.sin(player.blick) * vor * step;
+      player.z += Math.cos(player.blick) * vor * step;
+      bewegt = true;
+    }
+    player.targetX = player.x;
+    player.targetZ = player.z;
+  } else if (dx !== 0 || dz !== 0) {
     const len = Math.hypot(dx, dz);
     player.x += (dx / len) * step;
     player.z += (dz / len) * step;
@@ -1051,6 +1136,7 @@ function updatePlayer(dt) {
 
   player.x = Math.min(Math.max(player.x, -b.x), b.x);
   player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
+  schiebeAusLiegen(player);
   player.schritt = bewegt ? player.schritt + dt * 0.012 : 0;
 }
 
@@ -1060,7 +1146,7 @@ function checkInNearbyCustomers() {
   loungers.forEach((l, i) => {
     if (!l.waiting) return;
     const w = loungerWorld(i);
-    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.75) {
+    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.85) {
       const price = loungerPrice(i);
       state.money += price;
       l.waiting = false;
@@ -1077,7 +1163,7 @@ function cleanNearbyLoungers() {
   loungers.forEach((l, i) => {
     if (!l.dirty) return;
     const w = loungerWorld(i);
-    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.75) {
+    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.85) {
       l.dirty = false;
       l.trash = [];
       l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
@@ -1203,6 +1289,12 @@ hud.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  if (pointInRect(px, py, getViewButtonRect())) {
+    state.view = istEgoSicht() ? 'ueber' : 'ego';
+    saveState();
+    return;
+  }
+
   if (selectedLounger !== null) {
     if (pointInRect(px, py, getUpgradeButtonRect('close'))) {
       selectedLounger = null;
@@ -1232,6 +1324,39 @@ hud.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  // Alles Übrige ist eine Geste im Strand: Wischen dreht den Blick,
+  // kurzes Tippen wählt eine Liege oder schickt die Figur los.
+  blickGeste = { id: e.pointerId, x0: px, y0: py, blick0: player.blick, neigung0: player.neigung, gewischt: false };
+});
+
+// --- Umsehen durch Wischen (vor allem für die Ich-Perspektive) ---
+let blickGeste = null;
+const WISCH_SCHWELLE = 10; // ab so vielen Pixeln gilt es als Wischen, nicht als Tippen
+
+hud.addEventListener('pointermove', (e) => {
+  if (!blickGeste || e.pointerId !== blickGeste.id) return;
+  const rect = hud.getBoundingClientRect();
+  const dx = e.clientX - rect.left - blickGeste.x0;
+  const dy = e.clientY - rect.top - blickGeste.y0;
+  if (!blickGeste.gewischt && Math.hypot(dx, dy) < WISCH_SCHWELLE) return;
+  blickGeste.gewischt = true;
+  if (!istEgoSicht()) return; // in der Übersicht steht die Kamera fest
+  // nach rechts wischen dreht nach rechts: die Blickrichtung nimmt dabei ab
+  player.blick = blickGeste.blick0 - dx * 0.005;
+  player.neigung = Math.min(0.5, Math.max(-0.7, blickGeste.neigung0 - dy * 0.003));
+  player.targetX = player.x;
+  player.targetZ = player.z;
+});
+
+hud.addEventListener('pointerup', (e) => {
+  if (!blickGeste || e.pointerId !== blickGeste.id) return;
+  const geste = blickGeste;
+  blickGeste = null;
+  if (geste.gewischt) return; // war ein Umsehen, kein Tippen
+
+  const px = geste.x0;
+  const py = geste.y0;
+
   // Liege angetippt: Ausbau-Panel auf. Geht auch bei belegter Liege – bei knapp
   // 20 Sekunden pro Tag ist sonst kaum eine Liege lange genug frei.
   const hit = loungerAtScreen(px, py);
@@ -1245,12 +1370,18 @@ hud.addEventListener('pointerdown', (e) => {
   player.targetZ = Math.min(Math.max(ground.z, b.zMin), b.zMax);
 });
 
+hud.addEventListener('pointercancel', (e) => {
+  if (blickGeste && e.pointerId === blickGeste.id) blickGeste = null;
+});
+
 // --- Spielschleife ---
 let lastFrame = performance.now();
+let zeitMs = 0; // laufende Zeit für Brandung und andere Bewegung
 
 function update(now) {
   const dt = Math.min(now - lastFrame, 100); // nach einem Tabwechsel keine Riesensprünge
   lastFrame = now;
+  zeitMs = now;
 
   checkDayEnd();
 
@@ -1293,7 +1424,8 @@ function drawScene() {
 
   drawBeach();
   for (let i = 0; i < loungers.length; i++) drawLounger(i);
-  drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
+  // In der Ich-Perspektive steckt die Kamera im Kopf – die eigene Figur bliebe im Weg
+  if (!istEgoSicht()) drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
   if (state.staffed && liegeStaff.gesetzt) {
     drawPerson(liegeStaff.x, liegeStaff.z, COL.personalShirt, liegeStaff.blick, liegeStaff.schritt);
   }
@@ -1317,7 +1449,7 @@ function drawHud() {
 
   const moneyText = `💰 ${state.money}€`;
   ctx.font = 'bold 22px sans-serif';
-  const moneyRight = getResetButtonRect().x - 14;
+  const moneyRight = getViewButtonRect().x - 14;
   ctx.textAlign = 'right';
   ctx.fillText(moneyText, moneyRight, top.h / 2 + 7);
   const moneyLeft = moneyRight - ctx.measureText(moneyText).width;
@@ -1457,6 +1589,48 @@ function drawHud() {
     ctx.fillText('um sie auszubauen', hintLeft + hintW / 2, shop.y + shop.h / 2 + 18);
   }
 
+  // Ich-Perspektive: Fadenkreuz und was gerade davor liegt
+  if (istEgoSicht() && !dayEnded) {
+    const mx = hud.width / 2;
+    const my = (top.h + (hud.height - shop.h)) / 2; // Bildmitte des sichtbaren Streifens
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(mx, my, 4, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const ziel = loungerAtScreen(mx, my);
+    if (ziel !== -1) {
+      const w = loungerWorld(ziel);
+      if (Math.hypot(player.x - w.x, player.z - w.z) < 8) {
+        const l = loungers[ziel];
+        const zustand = l.dirty
+          ? '🗑️ muss aufgeräumt werden'
+          : l.waiting
+          ? `🧍 Gast wartet · ${loungerPrice(ziel)}€`
+          : l.booked
+          ? `😎 belegt · ${loungerPrice(ziel)}€/Tag`
+          : `frei · ${loungerPrice(ziel)}€/Tag`;
+        const titel = `Liege ${ziel + 1}`;
+        ctx.font = 'bold 15px sans-serif';
+        const bw = Math.max(ctx.measureText(titel).width, 0) + 24;
+        ctx.font = '13px sans-serif';
+        const bw2 = Math.max(bw, ctx.measureText(zustand).width + 24);
+        ctx.fillStyle = 'rgba(10, 30, 45, 0.72)';
+        ctx.beginPath();
+        ctx.roundRect(mx - bw2 / 2, my + 16, bw2, 46, 8);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 15px sans-serif';
+        ctx.fillText(titel, mx, my + 35);
+        ctx.font = '13px sans-serif';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.fillText(zustand, mx, my + 54);
+      }
+    }
+  }
+
   // Kurze Tagesabrechnung
   if (dayBanner) {
     ctx.globalAlpha = Math.min(1, dayBanner.life * 2.5);
@@ -1473,15 +1647,27 @@ function drawHud() {
     ctx.globalAlpha = 1;
   }
 
-  // Neu-starten-Button
+  // Sicht umschalten und Neu starten
+  const viewBtn = getViewButtonRect();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.beginPath();
+  ctx.roundRect(viewBtn.x, viewBtn.y, viewBtn.w, viewBtn.h, 8);
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(
+    istEgoSicht() ? '🛰 Übersicht' : '👁 Ich-Sicht',
+    viewBtn.x + viewBtn.w / 2,
+    viewBtn.y + viewBtn.h / 2 + 5
+  );
+
   const resetBtn = getResetButtonRect();
   ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
   ctx.beginPath();
   ctx.roundRect(resetBtn.x, resetBtn.y, resetBtn.w, resetBtn.h, 8);
   ctx.fill();
   ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 14px sans-serif';
-  ctx.textAlign = 'center';
   ctx.fillText('🔄 Neu starten', resetBtn.x + resetBtn.w / 2, resetBtn.y + resetBtn.h / 2 + 5);
 
   // Season-Abrechnung
