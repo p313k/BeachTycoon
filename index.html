@@ -119,6 +119,8 @@ const MAX_LOUNGER_COUNT = 24; // mehr passt nicht an den Strand
 const LOUNGER_COST_BASE = 120; // Preis für die erste zusätzliche Liege
 const LOUNGER_COST_GROWTH = 1.2; // jede weitere Liege wird teurer
 const SEASON_DURATION_MS = 30 * 60 * 1000; // eine ganze Season (Juni bis August) = 30 echte Minuten
+const DAY_START_HOUR = 8; // der Strandtag läuft von 08:00 Uhr
+const DAY_END_HOUR = 18; // bis 18:00 Uhr, dann ist Feierabend
 const BASE_BOOKING_PRICE = 12; // eine Liege für den ganzen Tag buchen
 const TRASH_CHANCE = 0.25; // Chance, dass eine Liege nach dem Tag Müll hinterlässt
 const STAFF_COST = 600; // Personal kümmert sich automatisch um alle Liegen
@@ -316,7 +318,7 @@ function startNextDay() {
 }
 
 function getClockLabel() {
-  const totalMinutes = 8 * 60 + dayProgress() * 12 * 60; // 08:00 bis 20:00
+  const totalMinutes = DAY_START_HOUR * 60 + dayProgress() * (DAY_END_HOUR - DAY_START_HOUR) * 60;
   const h = Math.floor(totalMinutes / 60);
   const m = Math.floor(totalMinutes % 60);
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
