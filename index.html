@@ -554,13 +554,15 @@ function updateCamera() {
   const aspectEgo = sceneCanvas.width / Math.max(1, sceneCanvas.height);
 
   if (istEgoSicht()) {
-    // Kamera sitzt im Kopf der Spielfigur und schaut in Blickrichtung
-    cameraEye = [player.x, AUGENHOEHE, player.z];
+    // Kamera sitzt im Kopf der Spielfigur und schaut in Blickrichtung.
+    // Beim Gehen wippt sie leicht, im Stehen steht sie still.
+    const wippen = player.schritt > 0 ? Math.sin(player.schritt * 2.2) * 0.045 : 0;
+    cameraEye = [player.x, AUGENHOEHE + wippen, player.z];
     const sicht = Math.tan(player.neigung);
     const target = [
-      player.x + Math.sin(player.blick) * 4,
-      AUGENHOEHE + sicht * 4,
-      player.z + Math.cos(player.blick) * 4,
+      cameraEye[0] + Math.sin(player.blick) * 4,
+      cameraEye[1] + sicht * 4,
+      cameraEye[2] + Math.cos(player.blick) * 4,
     ];
     const projEgo = mat4Perspective((62 * Math.PI) / 180, aspectEgo, 0.15, 600, versatzEgo);
     viewProj = mat4Multiply(projEgo, mat4LookAt(cameraEye, target, [0, 1, 0]));
@@ -779,6 +781,7 @@ const COL = {
   schatten: [0.78, 0.68, 0.5],
   meer: [0.18, 0.55, 0.72],
   schaum: [0.85, 0.93, 0.95],
+  sonne: [2.6, 2.4, 1.6], // über 1, damit die Sonne unabhängig vom Lichteinfall hell bleibt
   liege: [0.93, 0.72, 0.28],
   liegeSchmutzig: [0.55, 0.47, 0.35],
   gestell: [0.85, 0.85, 0.88],
@@ -893,9 +896,21 @@ function drawBeach() {
   box([0, -0.35, kante - 220], [900, 0.5, 440], COL.meer, 0, 0);
   // Sand: reicht seitlich und nach vorn weit über das Bild hinaus
   box([0, -0.2, kante + 200], [900, 0.42, 400], COL.sand, 0, 0);
-  // Uferkante mit nassem Sand und Schaumsaum
+  // Uferkante mit nassem Sand und Schaumsaum, der in der Brandung vor und zurück läuft
+  const brandung = Math.sin(zeitMs * 0.0007) * 0.5;
   box([0, -0.17, kante + 0.8], [900, 0.4, 1.8], COL.sandDunkel, 0, 0);
-  box([0, -0.15, kante - 0.5], [900, 0.38, 1.0], COL.schaum, 0, 0);
+  box([0, -0.15, kante - 0.4 + brandung], [900, 0.38, 1.1], COL.schaum, 0, 0);
+  box([0, -0.16, kante - 3.2 - brandung * 0.7], [900, 0.36, 0.5], COL.schaum, 0, 0);
+
+  // Sonne am Himmel, wandert mit dem Tag; überstrahlt bewusst die Beleuchtung
+  const sonne = getSunDirection();
+  box(
+    [cameraEye[0] + sonne[0] * 260, sonne[1] * 260, cameraEye[2] + sonne[2] * 260],
+    [26, 26, 26],
+    COL.sonne,
+    0,
+    0
+  );
 }
 
 // --- Spielfigur ---
@@ -1049,6 +1064,31 @@ function getInputDirection() {
   return { dx, dz };
 }
 
+// Liegen sind fest: die Figur wird aus ihnen herausgeschoben, statt hindurchzulaufen.
+// Wichtig in der Ich-Perspektive, sonst steht die Kamera in einer Matratze.
+function schiebeAusLiegen(pos) {
+  for (let i = 0; i < loungers.length; i++) {
+    const w = loungerWorld(i);
+    const breite = state.loungerUpgrades[i].doppel ? LOUNGER_W * 1.75 : LOUNGER_W;
+    // eng am Möbel bleiben: bei 2,6 m Reihenabstand muss zwischen den Reihen
+    // eine Gasse frei bleiben, sonst kommt man nirgendwo mehr durch
+    const halbX = breite / 2 + 0.22;
+    const halbZ = 1.05;
+    const dx = pos.x - w.x;
+    const dz = pos.z - w.z;
+    const durchdringungX = halbX - Math.abs(dx);
+    const durchdringungZ = halbZ - Math.abs(dz);
+    if (durchdringungX <= 0 || durchdringungZ <= 0) continue;
+    // an der Seite hinausschieben, die am nächsten liegt
+    if (durchdringungX < durchdringungZ) {
+      pos.x = w.x + Math.sign(dx || 1) * halbX;
+    } else {
+      pos.z = w.z + Math.sign(dz || 1) * halbZ;
+    }
+  }
+  return pos;
+}
+
 function beachBounds() {
   const g = getGrid();
   return { x: g.width / 2 + 3.5, zMin: -g.depth / 2 - 3.5, zMax: g.depth / 2 + 4.5 };
@@ -1096,6 +1136,7 @@ function updatePlayer(dt) {
 
   player.x = Math.min(Math.max(player.x, -b.x), b.x);
   player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
+  schiebeAusLiegen(player);
   player.schritt = bewegt ? player.schritt + dt * 0.012 : 0;
 }
 
@@ -1105,7 +1146,7 @@ function checkInNearbyCustomers() {
   loungers.forEach((l, i) => {
     if (!l.waiting) return;
     const w = loungerWorld(i);
-    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.75) {
+    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.85) {
       const price = loungerPrice(i);
       state.money += price;
       l.waiting = false;
@@ -1122,7 +1163,7 @@ function cleanNearbyLoungers() {
   loungers.forEach((l, i) => {
     if (!l.dirty) return;
     const w = loungerWorld(i);
-    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.75) {
+    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.85) {
       l.dirty = false;
       l.trash = [];
       l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
@@ -1335,10 +1376,12 @@ hud.addEventListener('pointercancel', (e) => {
 
 // --- Spielschleife ---
 let lastFrame = performance.now();
+let zeitMs = 0; // laufende Zeit für Brandung und andere Bewegung
 
 function update(now) {
   const dt = Math.min(now - lastFrame, 100); // nach einem Tabwechsel keine Riesensprünge
   lastFrame = now;
+  zeitMs = now;
 
   checkDayEnd();
 
@@ -1544,6 +1587,48 @@ function drawHud() {
     ctx.font = `${Math.max(11, Math.min(15, hintW * 0.075))}px sans-serif`;
     ctx.fillText('Tippe eine Liege an,', hintLeft + hintW / 2, shop.y + shop.h / 2 - 4);
     ctx.fillText('um sie auszubauen', hintLeft + hintW / 2, shop.y + shop.h / 2 + 18);
+  }
+
+  // Ich-Perspektive: Fadenkreuz und was gerade davor liegt
+  if (istEgoSicht() && !dayEnded) {
+    const mx = hud.width / 2;
+    const my = (top.h + (hud.height - shop.h)) / 2; // Bildmitte des sichtbaren Streifens
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(mx, my, 4, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const ziel = loungerAtScreen(mx, my);
+    if (ziel !== -1) {
+      const w = loungerWorld(ziel);
+      if (Math.hypot(player.x - w.x, player.z - w.z) < 8) {
+        const l = loungers[ziel];
+        const zustand = l.dirty
+          ? '🗑️ muss aufgeräumt werden'
+          : l.waiting
+          ? `🧍 Gast wartet · ${loungerPrice(ziel)}€`
+          : l.booked
+          ? `😎 belegt · ${loungerPrice(ziel)}€/Tag`
+          : `frei · ${loungerPrice(ziel)}€/Tag`;
+        const titel = `Liege ${ziel + 1}`;
+        ctx.font = 'bold 15px sans-serif';
+        const bw = Math.max(ctx.measureText(titel).width, 0) + 24;
+        ctx.font = '13px sans-serif';
+        const bw2 = Math.max(bw, ctx.measureText(zustand).width + 24);
+        ctx.fillStyle = 'rgba(10, 30, 45, 0.72)';
+        ctx.beginPath();
+        ctx.roundRect(mx - bw2 / 2, my + 16, bw2, 46, 8);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 15px sans-serif';
+        ctx.fillText(titel, mx, my + 35);
+        ctx.font = '13px sans-serif';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.fillText(zustand, mx, my + 54);
+      }
+    }
   }
 
   // Kurze Tagesabrechnung
