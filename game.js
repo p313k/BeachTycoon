@@ -39,7 +39,10 @@ function randomDelay(min, max) {
 
 // --- Grundeinstellungen ---
 const SAVE_KEY = 'beachTycoonSave';
-const LOUNGER_COUNT = 10;
+const START_LOUNGER_COUNT = 4; // so klein fängt ein neuer Strand an
+const MAX_LOUNGER_COUNT = 24; // mehr passt nicht an den Strand
+const LOUNGER_COST_BASE = 120; // Preis für die erste zusätzliche Liege
+const LOUNGER_COST_GROWTH = 1.2; // jede weitere Liege wird teurer
 const DAY_DURATION_MS = 30 * 60 * 1000; // eine Season = ein Tag = 30 echte Minuten (Zeitraffer)
 const BASE_BOOKING_PRICE = 12; // eine Liege für den ganzen Tag buchen
 const TRASH_CHANCE = 0.25; // Chance, dass eine Liege nach dem Tag Müll hinterlässt
@@ -48,7 +51,11 @@ const STAFF_COST = 600; // Personal kümmert sich automatisch um alle Liegen
 const UPGRADES = {
   schirm: { name: 'Sonnenschirm', icon: '☂️', cost: 80, bonus: 8 },
   tisch: { name: 'Beistelltisch', icon: '🪑', cost: 50, bonus: 5 },
+  windschutz: { name: 'Windschutz', icon: '🪟', cost: 110, bonus: 7 },
+  handtuch: { name: 'Handtuch-Service', icon: '🧺', cost: 130, bonus: 9 },
+  doppel: { name: 'Doppelliege', icon: '🛏️', cost: 200, bonus: 14 },
 };
+const UPGRADE_KEYS = Object.keys(UPGRADES);
 
 // Eine Strand-Season geht von Juni bis August
 const SEASON_MONTHS = [
@@ -71,8 +78,24 @@ function isLastDayOfSeason() {
   return state.day >= SEASON_LENGTH;
 }
 
-function defaultUpgrades() {
-  return Array.from({ length: LOUNGER_COUNT }, () => ({ schirm: false, tisch: false }));
+function emptyUpgrade() {
+  const u = {};
+  UPGRADE_KEYS.forEach((k) => (u[k] = false));
+  return u;
+}
+
+function defaultUpgrades(count) {
+  return Array.from({ length: count }, () => emptyUpgrade());
+}
+
+// Alte Spielstände kennen nur einen Teil der Ausbauten – fehlende Schlüssel auffüllen
+function normalizeUpgrades(list) {
+  if (!Array.isArray(list) || list.length === 0) return defaultUpgrades(START_LOUNGER_COUNT);
+  return list.slice(0, MAX_LOUNGER_COUNT).map((saved) => {
+    const u = emptyUpgrade();
+    UPGRADE_KEYS.forEach((k) => (u[k] = saved && saved[k] === true));
+    return u;
+  });
 }
 
 function loadState() {
@@ -87,7 +110,7 @@ function loadState() {
         seasonStartMoney: parsed.seasonStartMoney || 0,
         dayStartTime: parsed.dayStartTime || Date.now(),
         staffed: parsed.staffed === true,
-        loungerUpgrades: parsed.loungerUpgrades || defaultUpgrades(),
+        loungerUpgrades: normalizeUpgrades(parsed.loungerUpgrades),
       };
     }
   } catch (e) {}
@@ -98,7 +121,7 @@ function loadState() {
     seasonStartMoney: 0,
     dayStartTime: Date.now(),
     staffed: false,
-    loungerUpgrades: defaultUpgrades(),
+    loungerUpgrades: defaultUpgrades(START_LOUNGER_COUNT),
   };
 }
 
@@ -131,18 +154,44 @@ function addPopup(x, y, text) {
 function loungerPrice(i) {
   const u = state.loungerUpgrades[i];
   let price = BASE_BOOKING_PRICE;
-  if (u.schirm) price += UPGRADES.schirm.bonus;
-  if (u.tisch) price += UPGRADES.tisch.bonus;
+  UPGRADE_KEYS.forEach((k) => {
+    if (u[k]) price += UPGRADES[k].bonus;
+  });
   return price;
 }
 
-// --- Liegen: 10 Stück, jede kann einzeln ausgebaut werden ---
-const loungers = Array.from({ length: LOUNGER_COUNT }, () => ({
-  waiting: false,
-  booked: false,
-  dirty: false,
-  nextSpawn: performance.now() + randomDelay(5000, 60000),
-}));
+// --- Liegen: der Strand fängt klein an und wird dazugekauft ---
+function makeLounger() {
+  return {
+    waiting: false,
+    booked: false,
+    dirty: false,
+    nextSpawn: performance.now() + randomDelay(5000, 60000),
+  };
+}
+
+const loungers = Array.from({ length: state.loungerUpgrades.length }, makeLounger);
+
+function nextLoungerCost() {
+  const extra = loungers.length - START_LOUNGER_COUNT;
+  return Math.round(LOUNGER_COST_BASE * Math.pow(LOUNGER_COST_GROWTH, Math.max(0, extra)));
+}
+
+function beachIsFull() {
+  return loungers.length >= MAX_LOUNGER_COUNT;
+}
+
+function buyLounger() {
+  if (beachIsFull()) return;
+  const cost = nextLoungerCost();
+  if (state.money < cost) return;
+  state.money -= cost;
+  state.loungerUpgrades.push(emptyUpgrade());
+  loungers.push(makeLounger());
+  const slot = getLoungerRect(loungers.length - 1);
+  addPopup(slot.x + slot.w / 2, slot.y - 10, '🛏️ neu!');
+  saveState();
+}
 
 // --- Tag/Season-Fortschritt ---
 function dayProgress() {
@@ -212,23 +261,47 @@ function getTopBarRect() {
 }
 
 function getShopRect() {
-  const h = canvas.height * 0.22;
+  // Platz für Steuerkreuz + Knöpfe, aber auf großen Bildschirmen nicht ausufernd
+  const h = Math.max(150, Math.min(canvas.height * 0.26, 210));
   return { x: 0, y: canvas.height - h, w: canvas.width, h };
 }
 
-function getLoungerRect(index) {
+// Das Steuerkreuz sitzt links in der Leiste, alles andere rechts daneben
+function getDpadSize() {
   const shop = getShopRect();
-  const top = 70;
+  return Math.min(56, (shop.h - 20) / 3);
+}
+
+function getShopContentRect() {
+  const shop = getShopRect();
+  const left = shop.x + getDpadSize() * 3 + 20;
+  return { x: left, y: shop.y, w: shop.w - left, h: shop.h };
+}
+
+// Das Raster wächst mit der Zahl der Liegen mit und bleibt dabei möglichst quadratisch
+function getGrid() {
+  const shop = getShopRect();
+  const top = 82; // etwas Luft, damit die Sonnenschirme der ersten Reihe Platz haben
   const zoneH = shop.y - top;
-  const cols = 5;
-  const rows = 2;
+  const count = Math.max(1, loungers.length);
+  let cols = Math.max(1, Math.min(count, Math.ceil(Math.sqrt((count * canvas.width) / zoneH))));
+  const rows = Math.ceil(count / cols);
+  cols = Math.ceil(count / rows); // Reihen gleichmäßig füllen (4 Liegen -> 2x2 statt 3+1)
+  return { top, zoneH, cols, rows, count };
+}
+
+function getLoungerRect(index) {
+  const { top, zoneH, cols, rows, count } = getGrid();
   const cw = canvas.width / cols;
   const rh = zoneH / rows;
   const col = index % cols;
   const row = Math.floor(index / cols);
   const size = Math.min(cw, rh) * 0.68;
+  // angebrochene letzte Reihe mittig setzen
+  const inRow = Math.min(cols, count - row * cols);
+  const rowOffset = ((cols - inRow) * cw) / 2;
   return {
-    x: col * cw + cw / 2 - size / 2,
+    x: rowOffset + col * cw + cw / 2 - size / 2,
     y: top + row * rh + rh / 2 - size / 2,
     w: size,
     h: size,
@@ -240,22 +313,35 @@ function getResetButtonRect() {
 }
 
 function getPersonalButtonRect() {
-  const shop = getShopRect();
+  const area = getShopContentRect();
   const pad = 10;
-  return { x: shop.x + pad, y: shop.y + pad, w: shop.w * 0.28, h: shop.h - pad * 2 };
+  return { x: area.x, y: area.y + pad, w: area.w * 0.3, h: area.h - pad * 2 };
 }
 
-function getUpgradeButtonRect(which) {
-  const shop = getShopRect();
+function getBuyLoungerButtonRect() {
+  const area = getShopContentRect();
   const pad = 10;
-  if (which === 'close') {
-    return { x: shop.x + shop.w - 50, y: shop.y + pad, w: 40, h: 40 };
-  }
-  const leftX = shop.x + shop.w * 0.30;
-  const areaW = shop.w * 0.60;
-  const bw = areaW / 2 - pad;
-  const idx = which === 'schirm' ? 0 : 1;
-  return { x: leftX + idx * (bw + pad * 2), y: shop.y + pad, w: bw, h: shop.h - pad * 2 };
+  const personal = getPersonalButtonRect();
+  return { x: personal.x + personal.w + pad, y: area.y + pad, w: area.w * 0.3, h: area.h - pad * 2 };
+}
+
+// Ausbau-Panel: 3x2 Kacheln (5 Ausbauten + Fertig-Knopf), belegt die ganze Shop-Leiste
+const PANEL_CELLS = [...UPGRADE_KEYS, 'close'];
+
+function getUpgradeButtonRect(which) {
+  const area = getShopContentRect();
+  const pad = 8;
+  const cols = 3;
+  const rows = 2;
+  const index = Math.max(0, PANEL_CELLS.indexOf(which));
+  const cw = (area.w - pad * cols) / cols;
+  const ch = (area.h - pad * (rows + 1)) / rows;
+  return {
+    x: area.x + (index % cols) * (cw + pad),
+    y: area.y + pad + Math.floor(index / cols) * (ch + pad),
+    w: cw,
+    h: ch,
+  };
 }
 
 function getNextDayButtonRect() {
@@ -299,10 +385,10 @@ let dpadPointerId = null;
 
 function getDpadRects() {
   const shop = getShopRect();
-  const size = 56;
-  const gap = 6;
-  const cx = 20 + size + gap;
-  const cy = shop.y - 20 - size - gap;
+  const size = getDpadSize();
+  const gap = 2;
+  const cx = 10 + size * 1.5;
+  const cy = shop.y + shop.h / 2;
   return {
     up: { key: 'up', dx: 0, dy: -1, symbol: '▲', x: cx - size / 2, y: cy - size - gap, w: size, h: size },
     down: { key: 'down', dx: 0, dy: 1, symbol: '▼', x: cx - size / 2, y: cy + gap, w: size, h: size },
@@ -480,7 +566,7 @@ function resetGame() {
   state.seasonStartMoney = 0;
   state.dayStartTime = Date.now();
   state.staffed = false;
-  state.loungerUpgrades = defaultUpgrades();
+  state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
   saveState();
   location.reload();
 }
@@ -523,24 +609,28 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  // Personal-Button
-  if (pointInRect(px, py, getPersonalButtonRect())) {
-    buyStaff();
-    return;
-  }
-
-  // Ausbau-Panel für die ausgewählte Liege
+  // Ausbau-Panel für die ausgewählte Liege belegt die ganze Shop-Leiste
   if (selectedLounger !== null) {
     if (pointInRect(px, py, getUpgradeButtonRect('close'))) {
       selectedLounger = null;
       return;
     }
-    if (pointInRect(px, py, getUpgradeButtonRect('schirm'))) {
-      buyUpgrade(selectedLounger, 'schirm');
+    for (const kind of UPGRADE_KEYS) {
+      if (pointInRect(px, py, getUpgradeButtonRect(kind))) {
+        buyUpgrade(selectedLounger, kind);
+        return;
+      }
+    }
+  } else {
+    // Personal-Button
+    if (pointInRect(px, py, getPersonalButtonRect())) {
+      buyStaff();
       return;
     }
-    if (pointInRect(px, py, getUpgradeButtonRect('tisch'))) {
-      buyUpgrade(selectedLounger, 'tisch');
+
+    // Neue Liege kaufen
+    if (pointInRect(px, py, getBuyLoungerButtonRect())) {
+      buyLounger();
       return;
     }
   }
@@ -619,13 +709,24 @@ function draw() {
   ctx.textAlign = 'center';
   ctx.fillText('☀️', sunX, top.h / 2 + 10);
 
+  // Kopfzeile: Datum links, Geld rechts vor dem Reset-Knopf, Uhr in die Lücke dazwischen
   ctx.fillStyle = '#1a2a3a';
+  const dateText = `Season ${state.season} · ${getDateLabel(state.day)}`;
   ctx.font = 'bold 18px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText(`Season ${state.season} · ${getDateLabel(state.day)}`, 12, top.h / 2 + 6);
+  ctx.fillText(dateText, 12, top.h / 2 + 6);
+  const dateEnd = 12 + ctx.measureText(dateText).width;
 
+  const moneyText = `💰 ${state.money}€`;
+  ctx.font = 'bold 22px sans-serif';
+  const moneyRight = getResetButtonRect().x - 14;
+  ctx.textAlign = 'right';
+  ctx.fillText(moneyText, moneyRight, top.h / 2 + 7);
+  const moneyLeft = moneyRight - ctx.measureText(moneyText).width;
+
+  ctx.font = 'bold 18px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText(`🕗 ${getClockLabel()}`, canvas.width / 2, top.h / 2 + 6);
+  ctx.fillText(`🕗 ${getClockLabel()}`, (dateEnd + moneyLeft) / 2, top.h / 2 + 6);
 
   // Liegen (10 Stück)
   loungers.forEach((l, i) => {
@@ -646,14 +747,19 @@ function draw() {
 
     const cx = slot.x + slot.w / 2;
 
-    // Ausbauten anzeigen
+    // Ausbauten anzeigen: Schirm über der Liege, der Rest als kleine Leiste am unteren Rand
     if (u.schirm) {
       ctx.font = `${Math.max(16, slot.w * 0.4)}px sans-serif`;
       ctx.fillText('☂️', cx, slot.y - 6);
     }
-    if (u.tisch) {
-      ctx.font = `${Math.max(12, slot.w * 0.3)}px sans-serif`;
-      ctx.fillText('🪑', slot.x + slot.w + 4, slot.y + slot.h * 0.7);
+    const extras = UPGRADE_KEYS.filter((k) => k !== 'schirm' && u[k]);
+    if (extras.length > 0) {
+      const iconSize = Math.max(9, Math.min(slot.w * 0.22, slot.w / (extras.length + 0.5)));
+      ctx.font = `${iconSize}px sans-serif`;
+      const startX = cx - ((extras.length - 1) * iconSize) / 2;
+      extras.forEach((k, n) => {
+        ctx.fillText(UPGRADES[k].icon, startX + n * iconSize, slot.y + slot.h - 4);
+      });
     }
 
     if (l.dirty) {
@@ -684,8 +790,11 @@ function draw() {
   // Popups
   popups.forEach((p) => {
     ctx.globalAlpha = Math.max(p.life, 0);
-    ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 20px sans-serif';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#ffffff';
+    ctx.strokeText(p.text, p.x, p.y);
+    ctx.fillStyle = '#12324a';
     ctx.fillText(p.text, p.x, p.y);
     ctx.globalAlpha = 1;
   });
@@ -698,81 +807,104 @@ function draw() {
   ctx.font = '34px sans-serif';
   ctx.fillText('🧑', player.x, player.y + 10);
 
-  // Steuerkreuz
-  const dpadRects = getDpadRects();
-  Object.values(dpadRects).forEach((r) => {
-    const active = dpadDirection && dpadDirection.key === r.key;
-    ctx.fillStyle = active ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.4)';
-    ctx.beginPath();
-    ctx.roundRect(r.x, r.y, r.w, r.h, 10);
-    ctx.fill();
-    ctx.fillStyle = '#1a2a3a';
-    ctx.font = 'bold 22px sans-serif';
-    ctx.fillText(r.symbol, r.x + r.w / 2, r.y + r.h / 2 + 8);
-  });
-
   // Shop-Leiste
   const shop = getShopRect();
   ctx.fillStyle = '#12324a';
   ctx.fillRect(shop.x, shop.y, shop.w, shop.h);
 
-  // Personal-Button
-  const personalBtn = getPersonalButtonRect();
-  ctx.fillStyle = state.staffed ? '#2f5d3a' : '#1c3d54';
-  ctx.beginPath();
-  ctx.roundRect(personalBtn.x, personalBtn.y, personalBtn.w, personalBtn.h, 10);
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = `bold ${Math.max(12, personalBtn.w * 0.1)}px sans-serif`;
-  ctx.fillText('👷 Personal', personalBtn.x + personalBtn.w / 2, personalBtn.y + personalBtn.h * 0.42);
-  ctx.font = `${Math.max(11, personalBtn.w * 0.09)}px sans-serif`;
-  ctx.fillText(
-    state.staffed ? '✓ aktiv' : `${STAFF_COST}€`,
-    personalBtn.x + personalBtn.w / 2,
-    personalBtn.y + personalBtn.h * 0.72
-  );
+  // Steuerkreuz (links in der Leiste, damit es keine Liegen verdeckt)
+  Object.values(getDpadRects()).forEach((r) => {
+    const active = dpadDirection && dpadDirection.key === r.key;
+    ctx.fillStyle = active ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.35)';
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 10);
+    ctx.fill();
+    ctx.fillStyle = '#12324a';
+    ctx.font = `bold ${Math.max(14, r.h * 0.4)}px sans-serif`;
+    ctx.fillText(r.symbol, r.x + r.w / 2, r.y + r.h / 2 + r.h * 0.15);
+  });
 
   if (selectedLounger !== null) {
-    const i = selectedLounger;
-    const u = state.loungerUpgrades[i];
+    // Ausbau-Panel für die gewählte Liege
+    const u = state.loungerUpgrades[selectedLounger];
 
-    ['schirm', 'tisch'].forEach((kind) => {
+    UPGRADE_KEYS.forEach((kind) => {
       const btn = getUpgradeButtonRect(kind);
       const owned = u[kind];
-      ctx.fillStyle = owned ? '#2f5d3a' : '#1c3d54';
+      const affordable = state.money >= UPGRADES[kind].cost;
+      ctx.fillStyle = owned ? '#2f5d3a' : affordable ? '#1c3d54' : '#16293a';
       ctx.beginPath();
       ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
       ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = `bold ${Math.max(12, btn.w * 0.09)}px sans-serif`;
-      ctx.fillText(`${UPGRADES[kind].icon} ${UPGRADES[kind].name}`, btn.x + btn.w / 2, btn.y + btn.h * 0.4);
-      ctx.font = `${Math.max(11, btn.w * 0.08)}px sans-serif`;
+      ctx.fillStyle = owned || affordable ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
+      ctx.font = `bold ${Math.max(12, btn.w * 0.075)}px sans-serif`;
+      ctx.fillText(`${UPGRADES[kind].icon} ${UPGRADES[kind].name}`, btn.x + btn.w / 2, btn.y + btn.h * 0.44);
+      ctx.font = `${Math.max(10, btn.w * 0.065)}px sans-serif`;
       ctx.fillText(
-        owned ? `✓ +${UPGRADES[kind].bonus}€/Buchung` : `${UPGRADES[kind].cost}€ (+${UPGRADES[kind].bonus}€/Buchung)`,
+        owned ? `✓ +${UPGRADES[kind].bonus}€/Buchung` : `${UPGRADES[kind].cost}€ · +${UPGRADES[kind].bonus}€/Buchung`,
         btn.x + btn.w / 2,
-        btn.y + btn.h * 0.7
+        btn.y + btn.h * 0.75
       );
     });
 
     const closeBtn = getUpgradeButtonRect('close');
     ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
     ctx.beginPath();
-    ctx.roundRect(closeBtn.x, closeBtn.y, closeBtn.w, closeBtn.h, 8);
+    ctx.roundRect(closeBtn.x, closeBtn.y, closeBtn.w, closeBtn.h, 10);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 20px sans-serif';
-    ctx.fillText('✕', closeBtn.x + closeBtn.w / 2, closeBtn.y + closeBtn.h / 2 + 7);
+    ctx.font = `bold ${Math.max(12, closeBtn.w * 0.075)}px sans-serif`;
+    ctx.fillText(`Liege ${selectedLounger + 1}`, closeBtn.x + closeBtn.w / 2, closeBtn.y + closeBtn.h * 0.44);
+    ctx.font = `${Math.max(10, closeBtn.w * 0.065)}px sans-serif`;
+    ctx.fillText(
+      `✕ Fertig · ${loungerPrice(selectedLounger)}€/Tag`,
+      closeBtn.x + closeBtn.w / 2,
+      closeBtn.y + closeBtn.h * 0.75
+    );
   } else {
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.font = `${Math.max(12, shop.w * 0.02)}px sans-serif`;
-    ctx.fillText('Tippe eine freie Liege an, um sie auszubauen', shop.x + shop.w * 0.65, shop.y + shop.h / 2 + 5);
-  }
+    // Personal-Button
+    const personalBtn = getPersonalButtonRect();
+    ctx.fillStyle = state.staffed ? '#2f5d3a' : '#1c3d54';
+    ctx.beginPath();
+    ctx.roundRect(personalBtn.x, personalBtn.y, personalBtn.w, personalBtn.h, 10);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${Math.max(12, personalBtn.w * 0.1)}px sans-serif`;
+    ctx.fillText('👷 Personal', personalBtn.x + personalBtn.w / 2, personalBtn.y + personalBtn.h * 0.42);
+    ctx.font = `${Math.max(11, personalBtn.w * 0.09)}px sans-serif`;
+    ctx.fillText(
+      state.staffed ? '✓ aktiv' : `${STAFF_COST}€`,
+      personalBtn.x + personalBtn.w / 2,
+      personalBtn.y + personalBtn.h * 0.72
+    );
 
-  // HUD
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#1a2a3a';
-  ctx.font = 'bold 22px sans-serif';
-  ctx.fillText(`💰 ${state.money}€`, 12, top.h + 30);
+    // Neue Liege kaufen
+    const buyBtn = getBuyLoungerButtonRect();
+    const full = beachIsFull();
+    const cost = nextLoungerCost();
+    const affordable = !full && state.money >= cost;
+    ctx.fillStyle = full ? '#2f5d3a' : affordable ? '#1c3d54' : '#16293a';
+    ctx.beginPath();
+    ctx.roundRect(buyBtn.x, buyBtn.y, buyBtn.w, buyBtn.h, 10);
+    ctx.fill();
+    ctx.fillStyle = full || affordable ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
+    ctx.font = `bold ${Math.max(12, buyBtn.w * 0.1)}px sans-serif`;
+    ctx.fillText('🛏️ Neue Liege', buyBtn.x + buyBtn.w / 2, buyBtn.y + buyBtn.h * 0.42);
+    ctx.font = `${Math.max(11, buyBtn.w * 0.09)}px sans-serif`;
+    ctx.fillText(
+      full ? '✓ Strand voll' : `${cost}€ (${loungers.length}/${MAX_LOUNGER_COUNT})`,
+      buyBtn.x + buyBtn.w / 2,
+      buyBtn.y + buyBtn.h * 0.72
+    );
+
+    // Hinweis in den Rest der Leiste rechts neben den Knöpfen
+    const hintLeft = buyBtn.x + buyBtn.w + 12;
+    const hintW = shop.x + shop.w - 12 - hintLeft;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+    ctx.font = `${Math.max(11, Math.min(15, hintW * 0.075))}px sans-serif`;
+    ctx.fillText('Tippe eine freie Liege an,', hintLeft + hintW / 2, shop.y + shop.h / 2 - 4);
+    ctx.fillText('um sie auszubauen', hintLeft + hintW / 2, shop.y + shop.h / 2 + 18);
+  }
 
   // Neu-starten-Button
   const resetBtn = getResetButtonRect();
