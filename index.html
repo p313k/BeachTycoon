@@ -23,7 +23,11 @@ html, body {
   touch-action: none;
 }
 
-#game {
+/* Der Strand wird in 3D gezeichnet, die Bedienung liegt als flache Ebene darüber */
+#scene, #hud {
+  position: absolute;
+  top: 0;
+  left: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -31,20 +35,29 @@ html, body {
   </style>
 </head>
 <body>
-  <canvas id="game"></canvas>
+  <canvas id="scene"></canvas>
+  <canvas id="hud"></canvas>
   <script>
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+const sceneCanvas = document.getElementById('scene');
+const hud = document.getElementById('hud');
+const ctx = hud.getContext('2d');
+const gl = sceneCanvas.getContext('webgl', { antialias: true, alpha: false });
 
 // --- Größe ans iPad anpassen ---
 function resize() {
   const vv = window.visualViewport;
-  const width = vv ? vv.width : window.innerWidth;
-  const height = vv ? vv.height : window.innerHeight;
-  canvas.width = width;
-  canvas.height = height;
-  canvas.style.width = width + 'px';
-  canvas.style.height = height + 'px';
+  const width = Math.round(vv ? vv.width : window.innerWidth);
+  const height = Math.round(vv ? vv.height : window.innerHeight);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2); // 3D nicht unnötig hoch auflösen
+  for (const c of [sceneCanvas, hud]) {
+    c.style.width = width + 'px';
+    c.style.height = height + 'px';
+  }
+  hud.width = width;
+  hud.height = height;
+  sceneCanvas.width = Math.round(width * dpr);
+  sceneCanvas.height = Math.round(height * dpr);
+  if (gl) gl.viewport(0, 0, sceneCanvas.width, sceneCanvas.height);
 }
 window.addEventListener('resize', resize);
 if (window.visualViewport) {
@@ -148,6 +161,12 @@ const DAY_DURATION_MS = SEASON_DURATION_MS / SEASON_LENGTH;
 const SPAWN_MIN_MS = DAY_DURATION_MS * 0.05;
 const SPAWN_MAX_MS = DAY_DURATION_MS * 0.35;
 
+// --- Maße der 3D-Welt (1 Einheit ≈ 1 Meter) ---
+const CELL = 2.6; // Abstand von Liege zu Liege
+const LOUNGER_W = 1.0;
+const LOUNGER_L = 2.0;
+const MATTRESS_Y = 0.42; // Oberkante der Liegefläche
+
 function getDateLabel(dayOfSeason) {
   let remaining = dayOfSeason;
   for (const m of SEASON_MONTHS) {
@@ -209,7 +228,7 @@ function loadState() {
 }
 
 const state = loadState();
-let popups = []; // fliegende "+N€" Texte
+let popups = []; // fliegende "+N€" Texte, hängen an einer Weltposition
 let dayEnded = false;
 let dayBanner = null; // kurze Einblendung beim automatischen Tageswechsel
 let dayEarningsBase = state.money; // Geldstand zu Beginn des Tages, um "heute verdient" zu zeigen
@@ -230,8 +249,8 @@ function saveState() {
   );
 }
 
-function addPopup(x, y, text) {
-  popups.push({ x, y, text, life: 1 });
+function addPopup(x, y, z, text) {
+  popups.push({ x, y, z, text, life: 1, rise: 0 });
 }
 
 function loungerPrice(i) {
@@ -250,6 +269,7 @@ function makeLounger() {
     booked: false,
     dirty: false,
     nextSpawn: performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS),
+    trash: [],
   };
 }
 
@@ -271,9 +291,52 @@ function buyLounger() {
   state.money -= cost;
   state.loungerUpgrades.push(emptyUpgrade());
   loungers.push(makeLounger());
-  const slot = getLoungerRect(loungers.length - 1);
-  addPopup(slot.x + slot.w / 2, slot.y - 10, '🛏️ neu!');
+  const w = loungerWorld(loungers.length - 1);
+  addPopup(w.x, 1.6, w.z, '🛏️ neu!');
   saveState();
+}
+
+// --- Der Strand als Raster in der 3D-Welt ---
+// Das Raster wächst mit der Zahl der Liegen und bleibt dabei etwa so breit wie tief
+function getGrid() {
+  const count = Math.max(1, loungers.length);
+  let cols = Math.max(1, Math.ceil(Math.sqrt(count * 1.6)));
+  const rows = Math.ceil(count / cols);
+  cols = Math.ceil(count / rows); // Reihen gleichmäßig füllen (4 Liegen -> 2x2 statt 3+1)
+  return { cols, rows, count, width: cols * CELL, depth: rows * CELL };
+}
+
+// Weltposition einer Liege: X nach rechts, Z nach vorn (zur Kamera), Y nach oben
+function loungerWorld(index) {
+  const { cols, rows, count } = getGrid();
+  const col = index % cols;
+  const row = Math.floor(index / cols);
+  const inRow = Math.min(cols, count - row * cols);
+  const rowOffset = ((cols - inRow) * CELL) / 2; // angebrochene letzte Reihe mittig
+  return {
+    x: rowOffset + (col - (cols - 1) / 2) * CELL,
+    z: (row - (rows - 1) / 2) * CELL,
+  };
+}
+
+// Welche Liege wurde angetippt? Über den Bildschirmabstand statt über den Sandpunkt:
+// die Liege ist erhöht, ein Strahl auf den Boden landet sonst hinter ihr.
+function loungerAtScreen(px, py) {
+  let treffer = -1;
+  let besterAbstand = Infinity;
+  for (let i = 0; i < loungers.length; i++) {
+    const w = loungerWorld(i);
+    const mitte = worldToScreen(w.x, 0.5, w.z);
+    if (!mitte) continue;
+    const rand = worldToScreen(w.x + CELL * 0.45, 0.5, w.z);
+    const radius = rand ? Math.max(26, Math.abs(rand.x - mitte.x)) : 40;
+    const abstand = Math.hypot(px - mitte.x, py - mitte.y);
+    if (abstand < radius && abstand < besterAbstand) {
+      besterAbstand = abstand;
+      treffer = i;
+    }
+  }
+  return treffer;
 }
 
 // --- Tag/Season-Fortschritt ---
@@ -310,11 +373,22 @@ function startNextDay() {
     if (l.booked) {
       l.booked = false;
       l.dirty = Math.random() < TRASH_CHANCE;
+      if (l.dirty) l.trash = makeTrash();
     }
     l.waiting = false;
     l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
   });
   saveState();
+}
+
+// Müll liegt an zufälligen Stellen auf der Liege, damit nicht alles gleich aussieht
+function makeTrash() {
+  return Array.from({ length: 2 + Math.floor(Math.random() * 2) }, () => ({
+    dx: (Math.random() - 0.5) * 0.8,
+    dz: (Math.random() - 0.5) * 1.5,
+    rot: Math.random() * Math.PI,
+    size: 0.14 + Math.random() * 0.1,
+  }));
 }
 
 function getClockLabel() {
@@ -324,39 +398,523 @@ function getClockLabel() {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-function getSkyColor() {
-  const p = dayProgress();
-  const stops = [
-    { p: 0, c: [255, 198, 150] }, // Morgendämmerung
-    { p: 0.5, c: [126, 200, 227] }, // heller Mittag
-    { p: 1, c: [255, 150, 130] }, // Abendrot
-  ];
-  let a = stops[0];
-  let b = stops[1];
-  if (p > 0.5) {
-    a = stops[1];
-    b = stops[2];
-  }
-  const span = b.p - a.p;
-  const t = span === 0 ? 0 : (p - a.p) / span;
-  const r = Math.round(a.c[0] + (b.c[0] - a.c[0]) * t);
-  const g = Math.round(a.c[1] + (b.c[1] - a.c[1]) * t);
-  const bl = Math.round(a.c[2] + (b.c[2] - a.c[2]) * t);
-  return `rgb(${r}, ${g}, ${bl})`;
+function mixColor(a, b, t) {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
-// --- Layout ---
+// Himmel und Licht wandern über den Tag von Morgenrot über Mittag nach Abendrot
+function getSkyColor() {
+  const p = dayProgress();
+  const morgen = [1.0, 0.78, 0.59];
+  const mittag = [0.49, 0.78, 0.89];
+  const abend = [1.0, 0.59, 0.51];
+  return p <= 0.5 ? mixColor(morgen, mittag, p * 2) : mixColor(mittag, abend, (p - 0.5) * 2);
+}
+
+function getLightColor() {
+  const p = dayProgress();
+  const warm = [1.0, 0.85, 0.7];
+  const weiss = [1.0, 0.99, 0.95];
+  return p <= 0.5 ? mixColor(warm, weiss, p * 2) : mixColor(weiss, warm, (p - 0.5) * 2);
+}
+
+// Die Sonne zieht von Osten nach Westen, der Schattenwurf dreht sich mit
+function getSunDirection() {
+  const a = Math.PI * dayProgress();
+  const height = Math.sin(a) * 0.85 + 0.25;
+  return normalize3([Math.cos(a), height, 0.45]);
+}
+
+// --- Vektor- und Matrizenrechnung ---
+function normalize3(v) {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+
+function mat4Identity() {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+}
+
+function mat4Multiply(a, b) {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      out[c * 4 + r] =
+        a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return out;
+}
+
+// Perspektive mit senkrechtem Versatz: das Bild rutscht in den freien Streifen
+// zwischen Kopfzeile und Bedienleiste, statt hinter der Leiste zu verschwinden
+function mat4Perspective(fovY, aspect, near, far, shiftNdcY) {
+  const top = near * Math.tan(fovY / 2);
+  const shift = (shiftNdcY || 0) * top;
+  const t = top - shift;
+  const b = -top - shift;
+  const r = top * aspect;
+  const l = -r;
+  const out = new Float32Array(16);
+  out[0] = (2 * near) / (r - l);
+  out[5] = (2 * near) / (t - b);
+  out[8] = (r + l) / (r - l);
+  out[9] = (t + b) / (t - b);
+  out[10] = (far + near) / (near - far);
+  out[11] = -1;
+  out[14] = (2 * far * near) / (near - far);
+  return out;
+}
+
+function mat4LookAt(eye, target, up) {
+  const z = normalize3([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
+  const x = normalize3([up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0]]);
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  return new Float32Array([
+    x[0], y[0], z[0], 0,
+    x[1], y[1], z[1], 0,
+    x[2], y[2], z[2], 0,
+    -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]),
+    -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]),
+    -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]),
+    1,
+  ]);
+}
+
+// Drehung um Y, dann um X — spaltenweise abgelegt, wie WebGL es erwartet
+function rotationColumns(rotY, rotX) {
+  const cy = Math.cos(rotY || 0);
+  const sy = Math.sin(rotY || 0);
+  const cx = Math.cos(rotX || 0);
+  const sx = Math.sin(rotX || 0);
+  return [
+    cy, 0, -sy, // erste Spalte
+    sy * sx, cx, cy * sx, // zweite Spalte
+    sy * cx, -sx, cy * cx, // dritte Spalte
+  ];
+}
+
+// Modellmatrix aus Position, Größe und Drehung
+function mat4Model(pos, scale, rotY, rotX) {
+  const r = rotationColumns(rotY, rotX);
+  return new Float32Array([
+    r[0] * scale[0], r[1] * scale[0], r[2] * scale[0], 0,
+    r[3] * scale[1], r[4] * scale[1], r[5] * scale[1], 0,
+    r[6] * scale[2], r[7] * scale[2], r[8] * scale[2], 0,
+    pos[0], pos[1], pos[2], 1,
+  ]);
+}
+
+// Normalen brauchen die Drehung ohne Größenänderung, sonst stimmt die Beleuchtung nicht
+function mat3FromRotation(rotY, rotX) {
+  return new Float32Array(rotationColumns(rotY, rotX));
+}
+
+function mat4Invert(m) {
+  const inv = new Float32Array(16);
+  inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+  inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+  inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+  inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+  inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+  inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+  inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+  inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+  inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+  inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+  inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+  inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+  inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+  inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+  inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+  inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+  let det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+  if (!det) return mat4Identity();
+  det = 1 / det;
+  for (let i = 0; i < 16; i++) inv[i] *= det;
+  return inv;
+}
+
+// --- Kamera: schaut schräg von vorn über den ganzen Strand ---
+let viewProj = mat4Identity();
+let cameraEye = [0, 10, 14];
+
+function updateCamera() {
+  const g = getGrid();
+  const radius = Math.max(g.width, g.depth) / 2;
+  // Fester Neigungswinkel: flach genug, dass Meer und Himmel im Bild bleiben,
+  // steil genug, dass die hinteren Reihen nicht hinter den vorderen verschwinden
+  const neigung = (16 * Math.PI) / 180;
+  const target = [0, 1.1, -g.depth * 0.12];
+  // Mindestabstand, damit die Figur bei kleinem Strand nicht das halbe Bild füllt
+  const abstand = Math.max(13, g.depth * 0.5 + radius * 0.6 + 7.5);
+  cameraEye = [0, target[1] + abstand * Math.tan(neigung), target[2] + abstand];
+
+  // Freier Streifen zwischen Kopfzeile und Bedienleiste
+  const bandMitte = (getTopBarRect().h + (hud.height - getShopRect().h)) / 2;
+  const versatz = 1 - (2 * bandMitte) / hud.height;
+
+  const aspect = sceneCanvas.width / Math.max(1, sceneCanvas.height);
+  const proj = mat4Perspective((54 * Math.PI) / 180, aspect, 0.5, 600, versatz);
+  viewProj = mat4Multiply(proj, mat4LookAt(cameraEye, target, [0, 1, 0]));
+}
+
+// Weltpunkt -> Bildschirmpunkt der Bedienebene (für Preise und fliegende Texte)
+function worldToScreen(x, y, z) {
+  const m = viewProj;
+  const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+  const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+  const cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+  if (cw <= 0.0001) return null; // hinter der Kamera
+  return { x: ((cx / cw) * 0.5 + 0.5) * hud.width, y: (0.5 - (cy / cw) * 0.5) * hud.height };
+}
+
+// Bildschirmpunkt -> Punkt im Sand (Ebene y = 0)
+function screenToGround(px, py) {
+  const ndcX = (px / hud.width) * 2 - 1;
+  const ndcY = 1 - (py / hud.height) * 2;
+  const inv = mat4Invert(viewProj);
+  const unproject = (z) => {
+    const x = inv[0] * ndcX + inv[4] * ndcY + inv[8] * z + inv[12];
+    const y = inv[1] * ndcX + inv[5] * ndcY + inv[9] * z + inv[13];
+    const w = inv[2] * ndcX + inv[6] * ndcY + inv[10] * z + inv[14];
+    const q = inv[3] * ndcX + inv[7] * ndcY + inv[11] * z + inv[15];
+    return [x / q, y / q, w / q];
+  };
+  const near = unproject(-1);
+  const far = unproject(1);
+  const dir = [far[0] - near[0], far[1] - near[1], far[2] - near[2]];
+  if (Math.abs(dir[1]) < 1e-6) return null;
+  const t = -near[1] / dir[1];
+  if (t < 0) return null;
+  return { x: near[0] + dir[0] * t, z: near[2] + dir[2] * t };
+}
+
+// --- WebGL: ein Shader, ein paar Grundkörper ---
+const VERTEX_SHADER = `
+attribute vec3 aPos;
+attribute vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat3 uNormalMat;
+varying vec3 vNormal;
+void main() {
+  vNormal = uNormalMat * aNormal;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}`;
+
+const FRAGMENT_SHADER = `
+precision mediump float;
+varying vec3 vNormal;
+uniform vec3 uColor;
+uniform vec3 uLightDir;
+uniform vec3 uLightColor;
+uniform float uAmbient;
+void main() {
+  vec3 n = normalize(vNormal);
+  float diffus = max(dot(n, uLightDir), 0.0);
+  // etwas Aufhellung von unten, damit Schattenseiten nicht absaufen
+  float fuell = max(-n.y, 0.0) * 0.12;
+  vec3 c = uColor * uLightColor * (uAmbient + diffus * 0.8 + fuell);
+  gl_FragColor = vec4(c, 1.0);
+}`;
+
+function compileShader(type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const program = gl.createProgram();
+gl.attachShader(program, compileShader(gl.VERTEX_SHADER, VERTEX_SHADER));
+gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+
+const attrPos = gl.getAttribLocation(program, 'aPos');
+const attrNormal = gl.getAttribLocation(program, 'aNormal');
+const uniMVP = gl.getUniformLocation(program, 'uMVP');
+const uniNormalMat = gl.getUniformLocation(program, 'uNormalMat');
+const uniColor = gl.getUniformLocation(program, 'uColor');
+const uniLightDir = gl.getUniformLocation(program, 'uLightDir');
+const uniLightColor = gl.getUniformLocation(program, 'uLightColor');
+const uniAmbient = gl.getUniformLocation(program, 'uAmbient');
+
+function makeMesh(positions, normals, indices) {
+  const mesh = {
+    pos: gl.createBuffer(),
+    norm: gl.createBuffer(),
+    idx: gl.createBuffer(),
+    count: indices.length,
+  };
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.pos);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.norm);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.idx);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+  return mesh;
+}
+
+// Würfel mit Kantenlänge 1, Mittelpunkt im Ursprung
+function buildCube() {
+  const faces = [
+    { n: [0, 0, 1], v: [[-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5]] },
+    { n: [0, 0, -1], v: [[0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, 0.5, -0.5], [0.5, 0.5, -0.5]] },
+    { n: [1, 0, 0], v: [[0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [0.5, 0.5, 0.5]] },
+    { n: [-1, 0, 0], v: [[-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5], [-0.5, 0.5, 0.5], [-0.5, 0.5, -0.5]] },
+    { n: [0, 1, 0], v: [[-0.5, 0.5, 0.5], [0.5, 0.5, 0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5]] },
+    { n: [0, -1, 0], v: [[-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, -0.5, 0.5], [-0.5, -0.5, 0.5]] },
+  ];
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  faces.forEach((f, fi) => {
+    f.v.forEach((v) => {
+      positions.push(v[0], v[1], v[2]);
+      normals.push(f.n[0], f.n[1], f.n[2]);
+    });
+    const o = fi * 4;
+    indices.push(o, o + 1, o + 2, o, o + 2, o + 3);
+  });
+  return makeMesh(positions, normals, indices);
+}
+
+// Kegel für Sonnenschirme: Radius 0.5, Höhe 1, Spitze oben
+function buildCone(segments) {
+  const positions = [];
+  const normals = [];
+  const indices = [];
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i + 1) / segments) * Math.PI * 2;
+    const p0 = [Math.cos(a0) * 0.5, 0, Math.sin(a0) * 0.5];
+    const p1 = [Math.cos(a1) * 0.5, 0, Math.sin(a1) * 0.5];
+    const tip = [0, 1, 0];
+    const n = normalize3([Math.cos((a0 + a1) / 2), 0.5, Math.sin((a0 + a1) / 2)]);
+    const o = positions.length / 3;
+    [p0, p1, tip].forEach((p) => {
+      positions.push(p[0], p[1], p[2]);
+      normals.push(n[0], n[1], n[2]);
+    });
+    indices.push(o, o + 1, o + 2);
+    // Unterseite, damit der Schirm von unten nicht durchsichtig wirkt
+    const ob = positions.length / 3;
+    [[0, 0, 0], p1, p0].forEach((p) => {
+      positions.push(p[0], p[1], p[2]);
+      normals.push(0, -1, 0);
+    });
+    indices.push(ob, ob + 1, ob + 2);
+  }
+  return makeMesh(positions, normals, indices);
+}
+
+const CUBE = buildCube();
+const CONE = buildCone(18);
+
+let boundMesh = null;
+function bindMesh(mesh) {
+  if (boundMesh === mesh) return;
+  boundMesh = mesh;
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.pos);
+  gl.enableVertexAttribArray(attrPos);
+  gl.vertexAttribPointer(attrPos, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.norm);
+  gl.enableVertexAttribArray(attrNormal);
+  gl.vertexAttribPointer(attrNormal, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.idx);
+}
+
+function drawMesh(mesh, pos, scale, color, rotY, rotX) {
+  bindMesh(mesh);
+  const model = mat4Model(pos, scale, rotY, rotX);
+  gl.uniformMatrix4fv(uniMVP, false, mat4Multiply(viewProj, model));
+  gl.uniformMatrix3fv(uniNormalMat, false, mat3FromRotation(rotY, rotX));
+  gl.uniform3fv(uniColor, color);
+  gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0);
+}
+
+function box(pos, scale, color, rotY, rotX) {
+  drawMesh(CUBE, pos, scale, color, rotY, rotX);
+}
+
+// Flacher dunkler Fleck als Schatten unter Figuren und Schirmen
+function shadow(x, z, size) {
+  box([x, 0.03, z], [size, 0.01, size * 0.8], COL.schatten, 0, 0);
+}
+
+// --- Farben ---
+const COL = {
+  sand: [0.93, 0.83, 0.62],
+  sandDunkel: [0.86, 0.75, 0.53],
+  schatten: [0.78, 0.68, 0.5],
+  meer: [0.18, 0.55, 0.72],
+  schaum: [0.85, 0.93, 0.95],
+  liege: [0.93, 0.72, 0.28],
+  liegeSchmutzig: [0.55, 0.47, 0.35],
+  gestell: [0.85, 0.85, 0.88],
+  schirmA: [0.92, 0.31, 0.29],
+  schirmB: [0.98, 0.96, 0.93],
+  tisch: [0.75, 0.55, 0.35],
+  windschutz: [0.35, 0.55, 0.75],
+  handtuch: [0.97, 0.97, 0.99],
+  muell: [0.35, 0.33, 0.3],
+  hautGast: [0.86, 0.68, 0.52],
+  gastShirt: [0.35, 0.6, 0.85],
+  spielerShirt: [0.15, 0.72, 0.6],
+  personalShirt: [0.98, 0.66, 0.16],
+  hose: [0.28, 0.3, 0.38],
+  haar: [0.25, 0.19, 0.15],
+};
+
+// --- Figuren ---
+function drawPerson(x, z, shirt, blickY, gehPhase) {
+  const schwung = Math.sin(gehPhase) * 0.3;
+  // quer zur Blickrichtung stehen die Beine nebeneinander, längs schwingen sie beim Gehen
+  const qx = Math.cos(blickY);
+  const qz = -Math.sin(blickY);
+  const lx = Math.sin(blickY);
+  const lz = Math.cos(blickY);
+  shadow(x, z, 0.8);
+  // Beine
+  box([x + qx * 0.13 + lx * schwung * 0.25, 0.36, z + qz * 0.13 + lz * schwung * 0.25], [0.17, 0.72, 0.19], COL.hose, blickY, 0);
+  box([x - qx * 0.13 - lx * schwung * 0.25, 0.36, z - qz * 0.13 - lz * schwung * 0.25], [0.17, 0.72, 0.19], COL.hose, blickY, 0);
+  // Rumpf
+  box([x, 1.02, z], [0.5, 0.62, 0.29], shirt, blickY, 0);
+  // Arme
+  box([x + qx * 0.33, 1.02, z + qz * 0.33], [0.13, 0.55, 0.15], COL.hautGast, blickY, 0);
+  box([x - qx * 0.33, 1.02, z - qz * 0.33], [0.13, 0.55, 0.15], COL.hautGast, blickY, 0);
+  // Hals, Kopf und Haar
+  box([x, 1.38, z], [0.14, 0.12, 0.14], COL.hautGast, blickY, 0);
+  box([x, 1.6, z], [0.32, 0.34, 0.3], COL.hautGast, blickY, 0);
+  box([x, 1.75, z], [0.34, 0.1, 0.32], COL.haar, blickY, 0);
+}
+
+// Gast, der auf der Liege liegt
+function drawLiegenderGast(x, z, breit) {
+  box([x, MATTRESS_Y + 0.16, z + 0.1], [breit ? 0.5 : 0.38, 0.22, 1.15], COL.gastShirt, 0, 0);
+  box([x, MATTRESS_Y + 0.3, z - 0.62], [0.28, 0.28, 0.28], COL.hautGast, 0, 0);
+  box([x, MATTRESS_Y + 0.44, z - 0.66], [0.34, 0.08, 0.3], COL.haar, 0, 0);
+}
+
+// --- Eine Liege mit allem, was gekauft wurde ---
+function drawLounger(index) {
+  const l = loungers[index];
+  const u = state.loungerUpgrades[index];
+  const w = loungerWorld(index);
+  const breit = u.doppel;
+  const breite = breit ? LOUNGER_W * 1.75 : LOUNGER_W;
+  const farbe = l.dirty ? COL.liegeSchmutzig : COL.liege;
+
+  shadow(w.x, w.z, breite * 1.5);
+
+  // Gestell
+  [-1, 1].forEach((sx) => {
+    [-1, 1].forEach((sz) => {
+      box([w.x + sx * breite * 0.4, 0.16, w.z + sz * 0.78], [0.09, 0.32, 0.09], COL.gestell, 0, 0);
+    });
+  });
+  // Liegefläche
+  box([w.x, MATTRESS_Y - 0.05, w.z + 0.25], [breite, 0.16, 1.45], farbe, 0, 0);
+  // Rückenlehne, leicht aufgestellt
+  box([w.x, MATTRESS_Y + 0.16, w.z - 0.72], [breite, 0.16, 0.85], farbe, 0, -0.62);
+
+  if (u.handtuch) {
+    box([w.x, MATTRESS_Y + 0.05, w.z + 0.3], [breite * 0.72, 0.05, 1.15], COL.handtuch, 0, 0);
+  }
+  if (u.tisch) {
+    const tx = w.x + breite * 0.5 + 0.42;
+    box([tx, 0.24, w.z + 0.5], [0.1, 0.48, 0.1], COL.gestell, 0, 0);
+    box([tx, 0.5, w.z + 0.5], [0.52, 0.07, 0.52], COL.tisch, 0, 0);
+  }
+  if (u.windschutz) {
+    box([w.x, 0.44, w.z - 1.32], [breite * 1.25, 0.88, 0.07], COL.windschutz, 0, 0);
+    [-1, 1].forEach((s) => {
+      box([w.x + s * breite * 0.62, 0.46, w.z - 1.32], [0.08, 0.92, 0.11], COL.gestell, 0, 0);
+    });
+  }
+  if (u.schirm) {
+    const sx = w.x + breite * 0.5 + 0.2;
+    box([sx, 1.0, w.z - 0.25], [0.07, 2.0, 0.07], COL.gestell, 0, 0);
+    drawMesh(CONE, [sx, 1.92, w.z - 0.25], [1.95, 0.5, 1.95], COL.schirmA, 0, 0);
+    drawMesh(CONE, [sx, 2.06, w.z - 0.25], [1.1, 0.3, 1.1], COL.schirmB, 0, 0);
+  }
+
+  if (l.dirty) {
+    l.trash.forEach((t) => {
+      box([w.x + t.dx, MATTRESS_Y + 0.1, w.z + t.dz], [t.size, t.size, t.size], COL.muell, t.rot, 0);
+    });
+  } else if (l.booked) {
+    drawLiegenderGast(w.x, w.z + 0.15, breit);
+  } else if (l.waiting) {
+    drawPerson(w.x + breite * 0.5 + 0.9, w.z + 0.9, COL.gastShirt, Math.PI, 0);
+  }
+
+  if (selectedLounger === index) {
+    box([w.x, 0.03, w.z], [breite * 1.9, 0.02, CELL * 0.85], [1, 1, 1], 0, 0);
+  }
+}
+
+// --- Strand und Meer ---
+function drawBeach() {
+  const g = getGrid();
+  const kante = -g.depth / 2 - 5; // wo der Sand ins Wasser übergeht
+
+  // Meer bis zum Horizont, breit genug, dass an den Rändern kein Loch bleibt
+  box([0, -0.35, kante - 220], [900, 0.5, 440], COL.meer, 0, 0);
+  // Sand: reicht seitlich und nach vorn weit über das Bild hinaus
+  box([0, -0.2, kante + 200], [900, 0.42, 400], COL.sand, 0, 0);
+  // Uferkante mit nassem Sand und Schaumsaum
+  box([0, -0.17, kante + 0.8], [900, 0.4, 1.8], COL.sandDunkel, 0, 0);
+  box([0, -0.15, kante - 0.5], [900, 0.38, 1.0], COL.schaum, 0, 0);
+}
+
+// --- Spielfigur ---
+// Startet vorn links, damit die Figur nicht vor den Liegen steht
+const player = {
+  x: -getGrid().width / 2 - 1.2,
+  z: getGrid().depth / 2 + 1.4,
+  targetX: -getGrid().width / 2 - 1.2,
+  targetZ: getGrid().depth / 2 + 1.4,
+  speed: 6.2, // Einheiten pro Sekunde
+  blick: Math.PI,
+  schritt: 0,
+};
+
+// --- Tastatur (W/A/S/D oder Pfeiltasten) ---
+const pressedKeys = new Set();
+const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+window.addEventListener('keydown', (e) => {
+  const key = e.key.toLowerCase();
+  if (MOVE_KEYS.includes(key)) e.preventDefault();
+  pressedKeys.add(key);
+});
+window.addEventListener('keyup', (e) => {
+  pressedKeys.delete(e.key.toLowerCase());
+});
+
+function keyboardDirection() {
+  let dx = 0;
+  let dz = 0;
+  if (pressedKeys.has('w') || pressedKeys.has('arrowup')) dz -= 1;
+  if (pressedKeys.has('s') || pressedKeys.has('arrowdown')) dz += 1;
+  if (pressedKeys.has('a') || pressedKeys.has('arrowleft')) dx -= 1;
+  if (pressedKeys.has('d') || pressedKeys.has('arrowright')) dx += 1;
+  return { dx, dz };
+}
+
+// --- Bedienleiste unten (2D über der 3D-Ansicht) ---
 function getTopBarRect() {
-  return { x: 0, y: 0, w: canvas.width, h: 64 };
+  return { x: 0, y: 0, w: hud.width, h: 64 };
 }
 
 function getShopRect() {
-  // Platz für Steuerkreuz + Knöpfe, aber auf großen Bildschirmen nicht ausufernd
-  const h = Math.max(150, Math.min(canvas.height * 0.26, 210));
-  return { x: 0, y: canvas.height - h, w: canvas.width, h };
+  const h = Math.max(150, Math.min(hud.height * 0.26, 210));
+  return { x: 0, y: hud.height - h, w: hud.width, h };
 }
 
-// Das Steuerkreuz sitzt links in der Leiste, alles andere rechts daneben
 function getDpadSize() {
   const shop = getShopRect();
   return Math.min(56, (shop.h - 20) / 3);
@@ -368,38 +926,8 @@ function getShopContentRect() {
   return { x: left, y: shop.y, w: shop.w - left, h: shop.h };
 }
 
-// Das Raster wächst mit der Zahl der Liegen mit und bleibt dabei möglichst quadratisch
-function getGrid() {
-  const shop = getShopRect();
-  const top = 82; // etwas Luft, damit die Sonnenschirme der ersten Reihe Platz haben
-  const zoneH = shop.y - top;
-  const count = Math.max(1, loungers.length);
-  let cols = Math.max(1, Math.min(count, Math.ceil(Math.sqrt((count * canvas.width) / zoneH))));
-  const rows = Math.ceil(count / cols);
-  cols = Math.ceil(count / rows); // Reihen gleichmäßig füllen (4 Liegen -> 2x2 statt 3+1)
-  return { top, zoneH, cols, rows, count };
-}
-
-function getLoungerRect(index) {
-  const { top, zoneH, cols, rows, count } = getGrid();
-  const cw = canvas.width / cols;
-  const rh = zoneH / rows;
-  const col = index % cols;
-  const row = Math.floor(index / cols);
-  const size = Math.min(cw, rh) * 0.68;
-  // angebrochene letzte Reihe mittig setzen
-  const inRow = Math.min(cols, count - row * cols);
-  const rowOffset = ((cols - inRow) * cw) / 2;
-  return {
-    x: rowOffset + col * cw + cw / 2 - size / 2,
-    y: top + row * rh + rh / 2 - size / 2,
-    w: size,
-    h: size,
-  };
-}
-
 function getResetButtonRect() {
-  return { x: canvas.width - 132, y: 18, w: 120, h: 28 };
+  return { x: hud.width - 132, y: 18, w: 120, h: 28 };
 }
 
 function getPersonalButtonRect() {
@@ -415,7 +943,7 @@ function getBuyLoungerButtonRect() {
   return { x: personal.x + personal.w + pad, y: area.y + pad, w: area.w * 0.3, h: area.h - pad * 2 };
 }
 
-// Ausbau-Panel: 3x2 Kacheln (5 Ausbauten + Fertig-Knopf), belegt die ganze Shop-Leiste
+// Ausbau-Panel: 3x2 Kacheln (5 Ausbauten + Fertig-Knopf)
 const PANEL_CELLS = [...UPGRADE_KEYS, 'close'];
 
 function getUpgradeButtonRect(which) {
@@ -435,42 +963,11 @@ function getUpgradeButtonRect(which) {
 }
 
 function getNextDayButtonRect() {
-  return { x: canvas.width / 2 - 170, y: canvas.height / 2 + 30, w: 340, h: 50 };
+  return { x: hud.width / 2 - 170, y: hud.height / 2 + 30, w: 340, h: 50 };
 }
 
-// --- Spielfigur: läuft dorthin, wo man hintippt ---
-const player = {
-  x: canvas.width / 2,
-  y: (getTopBarRect().h + getShopRect().y) / 2,
-  targetX: canvas.width / 2,
-  targetY: (getTopBarRect().h + getShopRect().y) / 2,
-  speed: 260, // Pixel pro Sekunde
-};
-
-// --- Tastatur (W/A/S/D oder Pfeiltasten) ---
-const pressedKeys = new Set();
-const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
-window.addEventListener('keydown', (e) => {
-  const key = e.key.toLowerCase();
-  if (MOVE_KEYS.includes(key)) e.preventDefault();
-  pressedKeys.add(key);
-});
-window.addEventListener('keyup', (e) => {
-  pressedKeys.delete(e.key.toLowerCase());
-});
-
-function keyboardDirection() {
-  let dx = 0;
-  let dy = 0;
-  if (pressedKeys.has('w') || pressedKeys.has('arrowup')) dy -= 1;
-  if (pressedKeys.has('s') || pressedKeys.has('arrowdown')) dy += 1;
-  if (pressedKeys.has('a') || pressedKeys.has('arrowleft')) dx -= 1;
-  if (pressedKeys.has('d') || pressedKeys.has('arrowright')) dx += 1;
-  return { dx, dy };
-}
-
-// --- Steuerkreuz (Touch) unten links ---
-let dpadDirection = null; // { key, dx, dy } oder null
+// --- Steuerkreuz (Touch) ---
+let dpadDirection = null;
 let dpadPointerId = null;
 
 function getDpadRects() {
@@ -480,10 +977,10 @@ function getDpadRects() {
   const cx = 10 + size * 1.5;
   const cy = shop.y + shop.h / 2;
   return {
-    up: { key: 'up', dx: 0, dy: -1, symbol: '▲', x: cx - size / 2, y: cy - size - gap, w: size, h: size },
-    down: { key: 'down', dx: 0, dy: 1, symbol: '▼', x: cx - size / 2, y: cy + gap, w: size, h: size },
-    left: { key: 'left', dx: -1, dy: 0, symbol: '◀', x: cx - size - gap, y: cy - size / 2, w: size, h: size },
-    right: { key: 'right', dx: 1, dy: 0, symbol: '▶', x: cx + gap, y: cy - size / 2, w: size, h: size },
+    up: { key: 'up', dx: 0, dz: -1, symbol: '▲', x: cx - size / 2, y: cy - size - gap, w: size, h: size },
+    down: { key: 'down', dx: 0, dz: 1, symbol: '▼', x: cx - size / 2, y: cy + gap, w: size, h: size },
+    left: { key: 'left', dx: -1, dz: 0, symbol: '◀', x: cx - size - gap, y: cy - size / 2, w: size, h: size },
+    right: { key: 'right', dx: 1, dz: 0, symbol: '▶', x: cx + gap, y: cy - size / 2, w: size, h: size },
   };
 }
 
@@ -501,70 +998,74 @@ function releaseDpad(e) {
     dpadPointerId = null;
   }
 }
-canvas.addEventListener('pointerup', releaseDpad);
-canvas.addEventListener('pointercancel', releaseDpad);
-canvas.addEventListener('pointerleave', releaseDpad);
+hud.addEventListener('pointerup', releaseDpad);
+hud.addEventListener('pointercancel', releaseDpad);
+hud.addEventListener('pointerleave', releaseDpad);
 
 function getInputDirection() {
   let dx = 0;
-  let dy = 0;
+  let dz = 0;
   const kb = keyboardDirection();
   dx += kb.dx;
-  dy += kb.dy;
+  dz += kb.dz;
   if (dpadDirection) {
     dx += dpadDirection.dx;
-    dy += dpadDirection.dy;
+    dz += dpadDirection.dz;
   }
-  if (dx !== 0 || dy !== 0) {
-    const len = Math.hypot(dx, dy);
-    dx /= len;
-    dy /= len;
-  }
-  return { dx, dy };
+  return { dx, dz };
+}
+
+function beachBounds() {
+  const g = getGrid();
+  return { x: g.width / 2 + 3.5, zMin: -g.depth / 2 - 3.5, zMax: g.depth / 2 + 4.5 };
 }
 
 function updatePlayer(dt) {
   const step = player.speed * (dt / 1000);
-  const { dx, dy } = getInputDirection();
-  const top = getTopBarRect();
-  const shop = getShopRect();
+  const b = beachBounds();
+  const { dx, dz } = getInputDirection();
+  let bewegt = false;
 
-  if (dx !== 0 || dy !== 0) {
-    const len = Math.hypot(dx, dy);
-    player.x = Math.min(Math.max(player.x + (dx / len) * step, 20), canvas.width - 20);
-    player.y = Math.min(Math.max(player.y + (dy / len) * step, top.h + 10), shop.y - 20);
+  if (dx !== 0 || dz !== 0) {
+    const len = Math.hypot(dx, dz);
+    player.x += (dx / len) * step;
+    player.z += (dz / len) * step;
+    player.blick = Math.atan2(dx, dz);
     player.targetX = player.x;
-    player.targetY = player.y;
-    return;
+    player.targetZ = player.z;
+    bewegt = true;
+  } else {
+    const tx = player.targetX - player.x;
+    const tz = player.targetZ - player.z;
+    const dist = Math.hypot(tx, tz);
+    if (dist <= step || dist === 0) {
+      player.x = player.targetX;
+      player.z = player.targetZ;
+    } else {
+      player.x += (tx / dist) * step;
+      player.z += (tz / dist) * step;
+      player.blick = Math.atan2(tx, tz);
+      bewegt = true;
+    }
   }
 
-  const tx = player.targetX - player.x;
-  const ty = player.targetY - player.y;
-  const dist = Math.hypot(tx, ty);
-  if (dist <= step || dist === 0) {
-    player.x = player.targetX;
-    player.y = player.targetY;
-  } else {
-    player.x += (tx / dist) * step;
-    player.y += (ty / dist) * step;
-  }
+  player.x = Math.min(Math.max(player.x, -b.x), b.x);
+  player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
+  player.schritt = bewegt ? player.schritt + dt * 0.012 : 0;
 }
 
 // Läuft die Figur nah genug an eine Liege mit wartendem Kunden, wird der Tag gebucht
 function checkInNearbyCustomers() {
-  if (state.staffed) return; // Personal kümmert sich automatisch, kein manuelles Einchecken nötig
+  if (state.staffed) return; // Personal kümmert sich automatisch
   loungers.forEach((l, i) => {
     if (!l.waiting) return;
-    const slot = getLoungerRect(i);
-    const cx = slot.x + slot.w / 2;
-    const cy = slot.y + slot.h / 2;
-    const radius = Math.max(slot.w, slot.h) * 0.8;
-    if (Math.hypot(player.x - cx, player.y - cy) <= radius) {
+    const w = loungerWorld(i);
+    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.75) {
       const price = loungerPrice(i);
       state.money += price;
       l.waiting = false;
       l.booked = true;
-      addPopup(cx, slot.y - 10, `+${price}€`);
+      addPopup(w.x, 1.8, w.z, `+${price}€`);
       saveState();
     }
   });
@@ -575,20 +1076,18 @@ function cleanNearbyLoungers() {
   if (state.staffed) return;
   loungers.forEach((l, i) => {
     if (!l.dirty) return;
-    const slot = getLoungerRect(i);
-    const cx = slot.x + slot.w / 2;
-    const cy = slot.y + slot.h / 2;
-    const radius = Math.max(slot.w, slot.h) * 0.8;
-    if (Math.hypot(player.x - cx, player.y - cy) <= radius) {
+    const w = loungerWorld(i);
+    if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.75) {
       l.dirty = false;
+      l.trash = [];
       l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
-      addPopup(cx, slot.y - 10, '🧹 sauber!');
+      addPopup(w.x, 1.8, w.z, '🧹 sauber!');
     }
   });
 }
 
 // --- Liegen-Personal: eine sichtbare Person, die von Liege zu Liege läuft ---
-const liegeStaff = { x: null, y: null, targetIndex: null, speed: 180 };
+const liegeStaff = { x: 0, z: 0, targetIndex: null, speed: 4.6, blick: Math.PI, schritt: 0, gesetzt: false };
 
 function findLoungerNeedingAttention() {
   for (let i = 0; i < loungers.length; i++) {
@@ -598,14 +1097,16 @@ function findLoungerNeedingAttention() {
 }
 
 function updateLiegeStaff(dt) {
-  if (liegeStaff.x === null) {
-    const first = getLoungerRect(0);
-    liegeStaff.x = first.x + first.w / 2;
-    liegeStaff.y = first.y + first.h / 2;
+  if (!liegeStaff.gesetzt) {
+    const first = loungerWorld(0);
+    liegeStaff.x = first.x;
+    liegeStaff.z = first.z + 1.5;
+    liegeStaff.gesetzt = true;
   }
 
   const targetStillValid =
     liegeStaff.targetIndex !== null &&
+    liegeStaff.targetIndex < loungers.length &&
     (loungers[liegeStaff.targetIndex].waiting || loungers[liegeStaff.targetIndex].dirty);
 
   if (!targetStillValid) {
@@ -613,19 +1114,21 @@ function updateLiegeStaff(dt) {
     liegeStaff.targetIndex = found === -1 ? null : found;
   }
 
-  if (liegeStaff.targetIndex === null) return;
+  if (liegeStaff.targetIndex === null) {
+    liegeStaff.schritt = 0;
+    return;
+  }
 
-  const slot = getLoungerRect(liegeStaff.targetIndex);
-  const tx = slot.x + slot.w / 2;
-  const ty = slot.y + slot.h / 2;
-  const dx = tx - liegeStaff.x;
-  const dy = ty - liegeStaff.y;
-  const dist = Math.hypot(dx, dy);
+  const w = loungerWorld(liegeStaff.targetIndex);
+  const tx = w.x - liegeStaff.x;
+  const tz = w.z + 1.1 - liegeStaff.z;
+  const dist = Math.hypot(tx, tz);
   const step = liegeStaff.speed * (dt / 1000);
 
   if (dist <= step || dist === 0) {
-    liegeStaff.x = tx;
-    liegeStaff.y = ty;
+    liegeStaff.x = w.x;
+    liegeStaff.z = w.z + 1.1;
+    liegeStaff.schritt = 0;
     const i = liegeStaff.targetIndex;
     const l = loungers[i];
     if (l.waiting) {
@@ -633,17 +1136,20 @@ function updateLiegeStaff(dt) {
       state.money += price;
       l.waiting = false;
       l.booked = true;
-      addPopup(tx, slot.y - 10, `+${price}€`);
+      addPopup(w.x, 1.8, w.z, `+${price}€`);
       saveState();
     } else if (l.dirty) {
       l.dirty = false;
+      l.trash = [];
       l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
-      addPopup(tx, slot.y - 10, '🧹');
+      addPopup(w.x, 1.8, w.z, '🧹');
     }
     liegeStaff.targetIndex = null;
   } else {
-    liegeStaff.x += (dx / dist) * step;
-    liegeStaff.y += (dy / dist) * step;
+    liegeStaff.x += (tx / dist) * step;
+    liegeStaff.z += (tz / dist) * step;
+    liegeStaff.blick = Math.atan2(tx, tz);
+    liegeStaff.schritt += dt * 0.012;
   }
 }
 
@@ -681,26 +1187,22 @@ function buyStaff() {
 }
 
 // --- Eingabe ---
-canvas.addEventListener('pointerdown', (e) => {
-  const rect = canvas.getBoundingClientRect();
+hud.addEventListener('pointerdown', (e) => {
+  const rect = hud.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
 
-  // Tagesabrechnung: Button für nächsten Tag
+  // Season-Abrechnung: Button für die nächste Season
   if (dayEnded) {
-    if (pointInRect(px, py, getNextDayButtonRect())) {
-      startNextDay();
-    }
+    if (pointInRect(px, py, getNextDayButtonRect())) startNextDay();
     return;
   }
 
-  // Neu-starten-Button
   if (pointInRect(px, py, getResetButtonRect())) {
     resetGame();
     return;
   }
 
-  // Ausbau-Panel für die ausgewählte Liege belegt die ganze Shop-Leiste
   if (selectedLounger !== null) {
     if (pointInRect(px, py, getUpgradeButtonRect('close'))) {
       selectedLounger = null;
@@ -713,20 +1215,16 @@ canvas.addEventListener('pointerdown', (e) => {
       }
     }
   } else {
-    // Personal-Button
     if (pointInRect(px, py, getPersonalButtonRect())) {
       buyStaff();
       return;
     }
-
-    // Neue Liege kaufen
     if (pointInRect(px, py, getBuyLoungerButtonRect())) {
       buyLounger();
       return;
     }
   }
 
-  // Steuerkreuz
   const dpadHit = hitDpad(px, py);
   if (dpadHit) {
     dpadDirection = dpadHit;
@@ -734,44 +1232,32 @@ canvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  // Freie Liege antippen: Ausbau-Panel öffnen (Figur läuft trotzdem hin)
-  for (let i = 0; i < loungers.length; i++) {
-    const l = loungers[i];
-    const slot = getLoungerRect(i);
-    if (pointInRect(px, py, slot) && !l.booked && !l.dirty && !l.waiting) {
-      selectedLounger = selectedLounger === i ? null : i;
-      const top = getTopBarRect();
-      const shop = getShopRect();
-      player.targetX = Math.min(Math.max(px, 20), canvas.width - 20);
-      player.targetY = Math.min(Math.max(py, top.h + 10), shop.y - 20);
-      return;
-    }
-  }
+  // Liege angetippt: Ausbau-Panel auf. Geht auch bei belegter Liege – bei knapp
+  // 20 Sekunden pro Tag ist sonst kaum eine Liege lange genug frei.
+  const hit = loungerAtScreen(px, py);
+  selectedLounger = hit === -1 || selectedLounger === hit ? null : hit;
 
-  selectedLounger = null;
-
-  // Sonst: Figur zum angetippten Ort auf dem Strand laufen lassen
-  const top = getTopBarRect();
-  const shop = getShopRect();
-  player.targetX = Math.min(Math.max(px, 20), canvas.width - 20);
-  player.targetY = Math.min(Math.max(py, top.h + 10), shop.y - 20);
+  // Figur läuft zum angetippten Punkt im Sand
+  const ground = screenToGround(px, py);
+  if (!ground) return;
+  const b = beachBounds();
+  player.targetX = Math.min(Math.max(ground.x, -b.x), b.x);
+  player.targetZ = Math.min(Math.max(ground.z, b.zMin), b.zMax);
 });
 
 // --- Spielschleife ---
 let lastFrame = performance.now();
 
 function update(now) {
-  const dt = now - lastFrame;
+  const dt = Math.min(now - lastFrame, 100); // nach einem Tabwechsel keine Riesensprünge
   lastFrame = now;
 
   checkDayEnd();
 
   if (!dayEnded) {
-    // Kunden kommen von selbst zu sauberen, freien Liegen (nicht zu eingemüllten oder gebuchten)
     for (const l of loungers) {
       if (!l.booked && !l.dirty && !l.waiting && now >= l.nextSpawn) l.waiting = true;
     }
-
     updatePlayer(dt);
     checkInNearbyCustomers();
     cleanNearbyLoungers();
@@ -779,8 +1265,8 @@ function update(now) {
   }
 
   popups = popups.filter((p) => {
-    p.y -= dt * 0.03;
-    p.life -= dt / 800;
+    p.rise += dt * 0.0012;
+    p.life -= dt / 900;
     return p.life > 0;
   });
 
@@ -790,23 +1276,39 @@ function update(now) {
   }
 }
 
-function draw() {
-  // Strand
-  ctx.fillStyle = '#f2d29b';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+// --- 3D-Bild zeichnen ---
+function drawScene() {
+  updateCamera();
+  const sky = getSkyColor();
+  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
+  gl.clearColor(sky[0], sky[1], sky[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  // Himmel im Zeitraffer (Morgen -> Mittag -> Abend)
+  gl.useProgram(program);
+  gl.uniform3fv(uniLightDir, getSunDirection());
+  gl.uniform3fv(uniLightColor, getLightColor());
+  gl.uniform1f(uniAmbient, 0.55);
+
+  drawBeach();
+  for (let i = 0; i < loungers.length; i++) drawLounger(i);
+  drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
+  if (state.staffed && liegeStaff.gesetzt) {
+    drawPerson(liegeStaff.x, liegeStaff.z, COL.personalShirt, liegeStaff.blick, liegeStaff.schritt);
+  }
+}
+
+// --- Bedienebene zeichnen ---
+function drawHud() {
+  ctx.clearRect(0, 0, hud.width, hud.height);
   const top = getTopBarRect();
-  ctx.fillStyle = getSkyColor();
+
+  // Kopfzeile
+  ctx.fillStyle = 'rgba(10, 30, 45, 0.55)';
   ctx.fillRect(top.x, top.y, top.w, top.h);
 
-  const sunX = 40 + dayProgress() * (canvas.width - 80);
-  ctx.font = '26px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('☀️', sunX, top.h / 2 + 10);
-
-  // Kopfzeile: Datum links, Geld rechts vor dem Reset-Knopf, Uhr in die Lücke dazwischen
-  ctx.fillStyle = '#1a2a3a';
+  ctx.fillStyle = '#ffffff';
   const dateText = `Season ${state.season} · ${getDateLabel(state.day)}`;
   ctx.font = 'bold 18px sans-serif';
   ctx.textAlign = 'left';
@@ -824,91 +1326,48 @@ function draw() {
   ctx.textAlign = 'center';
   ctx.fillText(`🕗 ${getClockLabel()}`, (dateEnd + moneyLeft) / 2, top.h / 2 + 6);
 
-  // Liegen (10 Stück)
+  // Preisschild über jeder Liege mit wartendem Gast.
+  // Hintere Reihen zuerst, damit vordere Schilder oben liegen.
+  const schilder = [];
   loungers.forEach((l, i) => {
-    const slot = getLoungerRect(i);
-    const u = state.loungerUpgrades[i];
-    ctx.fillStyle = l.dirty ? '#8a7455' : '#e8b04b';
+    if (!l.waiting) return;
+    const w = loungerWorld(i);
+    const p = worldToScreen(w.x, 1.15, w.z + 0.9);
+    if (p) schilder.push({ p, text: `${loungerPrice(i)}€` });
+  });
+  schilder.sort((a, b) => a.p.y - b.p.y);
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'center';
+  schilder.forEach(({ p, text }) => {
+    const bw = ctx.measureText(text).width + 14;
+    ctx.fillStyle = 'rgba(10, 30, 45, 0.78)';
     ctx.beginPath();
-    ctx.roundRect(slot.x, slot.y, slot.w, slot.h, 8);
+    ctx.roundRect(p.x - bw / 2, p.y - 20, bw, 20, 6);
     ctx.fill();
-
-    if (selectedLounger === i) {
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.roundRect(slot.x - 3, slot.y - 3, slot.w + 6, slot.h + 6, 10);
-      ctx.stroke();
-    }
-
-    const cx = slot.x + slot.w / 2;
-
-    // Ausbauten anzeigen: Schirm über der Liege, der Rest als kleine Leiste am unteren Rand
-    if (u.schirm) {
-      ctx.font = `${Math.max(16, slot.w * 0.4)}px sans-serif`;
-      ctx.fillText('☂️', cx, slot.y - 6);
-    }
-    const extras = UPGRADE_KEYS.filter((k) => k !== 'schirm' && u[k]);
-    if (extras.length > 0) {
-      const iconSize = Math.max(9, Math.min(slot.w * 0.22, slot.w / (extras.length + 0.5)));
-      ctx.font = `${iconSize}px sans-serif`;
-      const startX = cx - ((extras.length - 1) * iconSize) / 2;
-      extras.forEach((k, n) => {
-        ctx.fillText(UPGRADES[k].icon, startX + n * iconSize, slot.y + slot.h - 4);
-      });
-    }
-
-    if (l.dirty) {
-      ctx.font = `${Math.max(14, slot.w * 0.35)}px sans-serif`;
-      ctx.fillText('🗑️', cx, slot.y + slot.h / 2 + 8);
-    } else if (l.booked) {
-      ctx.font = `${Math.max(16, slot.w * 0.4)}px sans-serif`;
-      ctx.fillText('😎', cx, slot.y + slot.h / 2 + 8);
-    } else if (l.waiting) {
-      ctx.font = `${Math.max(14, slot.w * 0.32)}px sans-serif`;
-      ctx.fillText('🧍', cx, slot.y + slot.h / 2 + 4);
-      ctx.fillStyle = '#1a2a3a';
-      ctx.font = `bold ${Math.max(10, slot.w * 0.13)}px sans-serif`;
-      ctx.fillText(`Buchen: ${loungerPrice(i)}€`, cx, slot.y + slot.h + 16);
-    }
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, p.x, p.y - 6);
   });
 
-  // Liegen-Personal (eine Person, läuft sichtbar herum)
-  if (state.staffed && liegeStaff.x !== null) {
-    ctx.beginPath();
-    ctx.ellipse(liegeStaff.x, liegeStaff.y + 14, 14, 5, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
-    ctx.fill();
-    ctx.font = '30px sans-serif';
-    ctx.fillText('👷', liegeStaff.x, liegeStaff.y + 8);
-  }
-
-  // Popups
+  // Fliegende Texte
   popups.forEach((p) => {
+    const s = worldToScreen(p.x, p.y + p.rise, p.z);
+    if (!s) return;
     ctx.globalAlpha = Math.max(p.life, 0);
     ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
     ctx.lineWidth = 4;
     ctx.strokeStyle = '#ffffff';
-    ctx.strokeText(p.text, p.x, p.y);
+    ctx.strokeText(p.text, s.x, s.y);
     ctx.fillStyle = '#12324a';
-    ctx.fillText(p.text, p.x, p.y);
+    ctx.fillText(p.text, s.x, s.y);
     ctx.globalAlpha = 1;
   });
 
-  // Spielfigur
-  ctx.beginPath();
-  ctx.ellipse(player.x, player.y + 16, 16, 6, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
-  ctx.fill();
-  ctx.font = '34px sans-serif';
-  ctx.fillText('🧑', player.x, player.y + 10);
-
-  // Shop-Leiste
+  // Bedienleiste
   const shop = getShopRect();
   ctx.fillStyle = '#12324a';
   ctx.fillRect(shop.x, shop.y, shop.w, shop.h);
 
-  // Steuerkreuz (links in der Leiste, damit es keine Liegen verdeckt)
   Object.values(getDpadRects()).forEach((r) => {
     const active = dpadDirection && dpadDirection.key === r.key;
     ctx.fillStyle = active ? 'rgba(255, 255, 255, 0.9)' : 'rgba(255, 255, 255, 0.35)';
@@ -917,13 +1376,12 @@ function draw() {
     ctx.fill();
     ctx.fillStyle = '#12324a';
     ctx.font = `bold ${Math.max(14, r.h * 0.4)}px sans-serif`;
+    ctx.textAlign = 'center';
     ctx.fillText(r.symbol, r.x + r.w / 2, r.y + r.h / 2 + r.h * 0.15);
   });
 
   if (selectedLounger !== null) {
-    // Ausbau-Panel für die gewählte Liege
     const u = state.loungerUpgrades[selectedLounger];
-
     UPGRADE_KEYS.forEach((kind) => {
       const btn = getUpgradeButtonRect(kind);
       const owned = u[kind];
@@ -958,7 +1416,6 @@ function draw() {
       closeBtn.y + closeBtn.h * 0.75
     );
   } else {
-    // Personal-Button
     const personalBtn = getPersonalButtonRect();
     ctx.fillStyle = state.staffed ? '#2f5d3a' : '#1c3d54';
     ctx.beginPath();
@@ -974,7 +1431,6 @@ function draw() {
       personalBtn.y + personalBtn.h * 0.72
     );
 
-    // Neue Liege kaufen
     const buyBtn = getBuyLoungerButtonRect();
     const full = beachIsFull();
     const cost = nextLoungerCost();
@@ -993,29 +1449,27 @@ function draw() {
       buyBtn.y + buyBtn.h * 0.72
     );
 
-    // Hinweis in den Rest der Leiste rechts neben den Knöpfen
     const hintLeft = buyBtn.x + buyBtn.w + 12;
     const hintW = shop.x + shop.w - 12 - hintLeft;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
     ctx.font = `${Math.max(11, Math.min(15, hintW * 0.075))}px sans-serif`;
-    ctx.fillText('Tippe eine freie Liege an,', hintLeft + hintW / 2, shop.y + shop.h / 2 - 4);
+    ctx.fillText('Tippe eine Liege an,', hintLeft + hintW / 2, shop.y + shop.h / 2 - 4);
     ctx.fillText('um sie auszubauen', hintLeft + hintW / 2, shop.y + shop.h / 2 + 18);
   }
 
-  // Kurze Tagesabrechnung beim automatischen Wechsel
+  // Kurze Tagesabrechnung
   if (dayBanner) {
-    ctx.globalAlpha = Math.min(1, dayBanner.life * 2.5); // die letzte Sekunde ausblenden
+    ctx.globalAlpha = Math.min(1, dayBanner.life * 2.5);
     ctx.font = 'bold 19px sans-serif';
     ctx.textAlign = 'center';
     const bw = ctx.measureText(dayBanner.text).width + 36;
-    const bx = canvas.width / 2 - bw / 2;
-    const by = getTopBarRect().h + 10;
+    const by = top.h + 10;
     ctx.fillStyle = 'rgba(18, 50, 74, 0.85)';
     ctx.beginPath();
-    ctx.roundRect(bx, by, bw, 38, 10);
+    ctx.roundRect(hud.width / 2 - bw / 2, by, bw, 38, 10);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(dayBanner.text, canvas.width / 2, by + 25);
+    ctx.fillText(dayBanner.text, hud.width / 2, by + 25);
     ctx.globalAlpha = 1;
   }
 
@@ -1025,31 +1479,22 @@ function draw() {
   ctx.beginPath();
   ctx.roundRect(resetBtn.x, resetBtn.y, resetBtn.w, resetBtn.h, 8);
   ctx.fill();
-  ctx.fillStyle = '#1a2a3a';
+  ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 14px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText('🔄 Neu starten', resetBtn.x + resetBtn.w / 2, resetBtn.y + resetBtn.h / 2 + 5);
 
-  // Tagesabrechnung (oder Season-Ende, wenn August vorbei ist)
+  // Season-Abrechnung
   if (dayEnded) {
-    const seasonOver = isLastDayOfSeason();
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, hud.width, hud.height);
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
     ctx.font = 'bold 34px sans-serif';
-    ctx.fillText(
-      seasonOver ? `🏖️ Season ${state.season} beendet!` : `🌅 ${getDateLabel(state.day)} beendet!`,
-      canvas.width / 2,
-      canvas.height / 2 - 40
-    );
+    ctx.fillText(`🏖️ Season ${state.season} beendet!`, hud.width / 2, hud.height / 2 - 40);
     ctx.font = '22px sans-serif';
-    ctx.fillText(`Heute verdient: ${state.money - dayEarningsBase}€`, canvas.width / 2, canvas.height / 2);
-    ctx.fillText(
-      seasonOver ? `Diese Season verdient: ${state.money - state.seasonStartMoney}€` : `Gesamt: ${state.money}€`,
-      canvas.width / 2,
-      canvas.height / 2 + 30
-    );
+    ctx.fillText(`Heute verdient: ${state.money - dayEarningsBase}€`, hud.width / 2, hud.height / 2);
+    ctx.fillText(`Diese Season verdient: ${state.money - state.seasonStartMoney}€`, hud.width / 2, hud.height / 2 + 30);
 
     const nextBtn = getNextDayButtonRect();
     ctx.fillStyle = '#2f5d3a';
@@ -1057,18 +1502,15 @@ function draw() {
     ctx.roundRect(nextBtn.x, nextBtn.y, nextBtn.w, nextBtn.h, 12);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${seasonOver ? 17 : 20}px sans-serif`;
-    ctx.fillText(
-      seasonOver ? '▶ Neue Season starten (Juni)' : '▶ Nächsten Tag starten',
-      nextBtn.x + nextBtn.w / 2,
-      nextBtn.y + nextBtn.h / 2 + 7
-    );
+    ctx.font = 'bold 17px sans-serif';
+    ctx.fillText('▶ Neue Season starten (Juni)', nextBtn.x + nextBtn.w / 2, nextBtn.y + nextBtn.h / 2 + 7);
   }
 }
 
 function loop(now) {
   update(now);
-  draw();
+  drawScene();
+  drawHud();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
