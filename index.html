@@ -142,7 +142,9 @@ const DAY_START_HOUR = 8; // der Strandtag läuft von 08:00 Uhr
 const DAY_END_HOUR = 18; // bis 18:00 Uhr, dann ist Feierabend
 const BASE_BOOKING_PRICE = 12; // eine Liege für den ganzen Tag buchen
 const TRASH_CHANCE = 0.25; // Chance, dass eine Liege nach dem Tag Müll hinterlässt
-const STAFF_COST = 600; // Personal kümmert sich automatisch um alle Liegen
+const STAFF_COST_BASE = 600; // erster Mitarbeiter für die Liegen
+const STAFF_COST_GROWTH = 1.4; // jeder weitere will mehr Lohn
+const MAX_STAFF = 6; // mehr Leute passen nicht sinnvoll an den Strand
 const EISWAGEN_COST = 900; // Eiswagen inklusive Eismann, der von selbst verkauft
 const EIS_PREIS = 8; // was ein Eis am Gast einbringt
 const BOOTSVERLEIH_COST = 1200; // Hütte am Ufer samt Booten
@@ -223,7 +225,7 @@ function loadState() {
         season: parsed.season || 1,
         seasonStartMoney: parsed.seasonStartMoney || 0,
         dayStartTime: parsed.dayStartTime || Date.now(),
-        staffed: parsed.staffed === true,
+        staff: typeof parsed.staff === 'number' ? Math.min(MAX_STAFF, Math.max(0, Math.round(parsed.staff))) : parsed.staffed === true ? 1 : 0,
         eiswagen: parsed.eiswagen === true,
         bootsverleih: parsed.bootsverleih === true,
         view: parsed.view === 'ueber' ? 'ueber' : 'ego',
@@ -237,7 +239,7 @@ function loadState() {
     season: 1,
     seasonStartMoney: 0,
     dayStartTime: Date.now(),
-    staffed: false,
+    staff: 0,
     eiswagen: false,
     bootsverleih: false,
     view: 'ego', // Ich-Perspektive, umschaltbar auf 'ueber' (Blick über den ganzen Strand)
@@ -265,7 +267,7 @@ function saveState() {
       season: state.season,
       seasonStartMoney: state.seasonStartMoney,
       dayStartTime: state.dayStartTime,
-      staffed: state.staffed,
+      staff: state.staff,
       eiswagen: state.eiswagen,
       bootsverleih: state.bootsverleih,
       view: state.view,
@@ -1370,8 +1372,8 @@ function updatePlayer(dt) {
 }
 
 // Läuft die Figur nah genug an eine Liege mit wartendem Kunden, wird der Tag gebucht
+// Auch mit Personal kann man selbst kassieren - wer zuerst da ist, macht es
 function checkInNearbyCustomers() {
-  if (state.staffed) return; // Personal kümmert sich automatisch
   loungers.forEach((l, i) => {
     if (!l.waiting) return;
     const w = loungerWorld(i);
@@ -1388,7 +1390,6 @@ function checkInNearbyCustomers() {
 
 // Läuft die Figur nah genug an eine eingemüllte Liege, wird sie sauber gemacht
 function cleanNearbyLoungers() {
-  if (state.staffed) return;
   loungers.forEach((l, i) => {
     if (!l.dirty) return;
     const w = loungerWorld(i);
@@ -1401,70 +1402,103 @@ function cleanNearbyLoungers() {
   });
 }
 
-// --- Liegen-Personal: eine sichtbare Person, die von Liege zu Liege läuft ---
-const liegeStaff = { x: 0, z: 0, targetIndex: null, speed: 4.6, blick: Math.PI, schritt: 0, gesetzt: false };
+// --- Liegen-Personal: mehrere sichtbare Leute, die von Liege zu Liege laufen ---
+const liegeStaffs = [];
 
-function findLoungerNeedingAttention() {
+function ensureStaffFigures() {
+  while (liegeStaffs.length < state.staff) {
+    liegeStaffs.push({
+      nr: liegeStaffs.length,
+      x: 0,
+      z: 0,
+      targetIndex: null,
+      speed: 4.6,
+      blick: Math.PI,
+      schritt: 0,
+      gesetzt: false,
+    });
+  }
+  liegeStaffs.length = state.staff;
+}
+
+// Liege, die Aufmerksamkeit braucht und noch von niemandem angesteuert wird
+function findLoungerNeedingAttention(vergeben) {
   for (let i = 0; i < loungers.length; i++) {
+    if (vergeben.has(i)) continue;
     if (loungers[i].waiting || loungers[i].dirty) return i;
   }
   return -1;
 }
 
 function updateLiegeStaff(dt) {
-  if (!liegeStaff.gesetzt) {
-    const first = loungerWorld(0);
-    liegeStaff.x = first.x;
-    liegeStaff.z = first.z + 1.5;
-    liegeStaff.gesetzt = true;
+  ensureStaffFigures();
+  const g = getGrid();
+
+  // Wer schon ein Ziel hat, behält es - so laufen nicht alle zur selben Liege
+  const vergeben = new Set();
+  for (const s of liegeStaffs) {
+    const gueltig =
+      s.targetIndex !== null &&
+      s.targetIndex < loungers.length &&
+      (loungers[s.targetIndex].waiting || loungers[s.targetIndex].dirty);
+    if (gueltig) vergeben.add(s.targetIndex);
+    else s.targetIndex = null;
   }
 
-  const targetStillValid =
-    liegeStaff.targetIndex !== null &&
-    liegeStaff.targetIndex < loungers.length &&
-    (loungers[liegeStaff.targetIndex].waiting || loungers[liegeStaff.targetIndex].dirty);
-
-  if (!targetStillValid) {
-    const found = findLoungerNeedingAttention();
-    liegeStaff.targetIndex = found === -1 ? null : found;
-  }
-
-  if (liegeStaff.targetIndex === null) {
-    liegeStaff.schritt = 0;
-    return;
-  }
-
-  const w = loungerWorld(liegeStaff.targetIndex);
-  const tx = w.x - liegeStaff.x;
-  const tz = w.z + 1.1 - liegeStaff.z;
-  const dist = Math.hypot(tx, tz);
-  const step = liegeStaff.speed * (dt / 1000);
-
-  if (dist <= step || dist === 0) {
-    liegeStaff.x = w.x;
-    liegeStaff.z = w.z + 1.1;
-    liegeStaff.schritt = 0;
-    const i = liegeStaff.targetIndex;
-    const l = loungers[i];
-    if (l.waiting) {
-      const price = loungerPrice(i);
-      state.money += price;
-      l.waiting = false;
-      l.booked = true;
-      addPopup(w.x, 1.8, w.z, `+${price}€`);
-      saveState();
-    } else if (l.dirty) {
-      l.dirty = false;
-      l.trash = [];
-      l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
-      addPopup(w.x, 1.8, w.z, '🧹');
+  for (const s of liegeStaffs) {
+    if (!s.gesetzt) {
+      // nebeneinander am vorderen Rand einreihen
+      s.x = (s.nr - (Math.max(1, liegeStaffs.length) - 1) / 2) * 2.2;
+      s.z = g.depth / 2 + 1.8;
+      s.gesetzt = true;
     }
-    liegeStaff.targetIndex = null;
-  } else {
-    liegeStaff.x += (tx / dist) * step;
-    liegeStaff.z += (tz / dist) * step;
-    liegeStaff.blick = Math.atan2(tx, tz);
-    liegeStaff.schritt += dt * 0.012;
+
+    if (s.targetIndex === null) {
+      const gefunden = findLoungerNeedingAttention(vergeben);
+      if (gefunden !== -1) {
+        s.targetIndex = gefunden;
+        vergeben.add(gefunden);
+      }
+    }
+
+    if (s.targetIndex === null) {
+      s.schritt = 0;
+      continue;
+    }
+
+    const w = loungerWorld(s.targetIndex);
+    const tx = w.x - s.x;
+    const tz = w.z + 1.1 - s.z;
+    const dist = Math.hypot(tx, tz);
+    const step = s.speed * (dt / 1000);
+
+    if (dist <= step || dist === 0) {
+      s.x = w.x;
+      s.z = w.z + 1.1;
+      s.schritt = 0;
+      const i = s.targetIndex;
+      const l = loungers[i];
+      if (l.waiting) {
+        const price = loungerPrice(i);
+        state.money += price;
+        l.waiting = false;
+        l.booked = true;
+        addPopup(w.x, 1.8, w.z, `+${price}€`);
+        saveState();
+      } else if (l.dirty) {
+        l.dirty = false;
+        l.trash = [];
+        l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
+        addPopup(w.x, 1.8, w.z, '🧹');
+      }
+      vergeben.delete(i);
+      s.targetIndex = null;
+    } else {
+      s.x += (tx / dist) * step;
+      s.z += (tz / dist) * step;
+      s.blick = Math.atan2(tx, tz);
+      s.schritt += dt * 0.012;
+    }
   }
 }
 
@@ -1624,7 +1658,7 @@ function resetGame() {
   state.season = 1;
   state.seasonStartMoney = 0;
   state.dayStartTime = Date.now();
-  state.staffed = false;
+  state.staff = 0;
   state.eiswagen = false;
   state.bootsverleih = false;
   state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
@@ -1643,11 +1677,17 @@ function buyUpgrade(index, kind) {
   saveState();
 }
 
+function nextStaffCost() {
+  return Math.round(STAFF_COST_BASE * Math.pow(STAFF_COST_GROWTH, state.staff));
+}
+
 function buyStaff() {
-  if (state.staffed) return;
-  if (state.money < STAFF_COST) return;
-  state.money -= STAFF_COST;
-  state.staffed = true;
+  if (state.staff >= MAX_STAFF) return;
+  const cost = nextStaffCost();
+  if (state.money < cost) return;
+  state.money -= cost;
+  state.staff += 1;
+  ensureStaffFigures();
   saveState();
 }
 
@@ -1792,7 +1832,7 @@ function update(now) {
     updatePlayer(dt);
     checkInNearbyCustomers();
     cleanNearbyLoungers();
-    if (state.staffed) updateLiegeStaff(dt);
+    if (state.staff > 0) updateLiegeStaff(dt);
     updateEisWuensche(now);
     if (state.eiswagen) updateEismann(dt);
     updateBootsverleih(dt, now);
@@ -1837,9 +1877,9 @@ function drawScene() {
   }
   // In der Ich-Perspektive steckt die Kamera im Kopf – die eigene Figur bliebe im Weg
   if (!istEgoSicht()) drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
-  if (state.staffed && liegeStaff.gesetzt) {
-    drawPerson(liegeStaff.x, liegeStaff.z, COL.personalShirt, liegeStaff.blick, liegeStaff.schritt);
-  }
+  liegeStaffs.forEach((s) => {
+    if (s.gesetzt) drawPerson(s.x, s.z, COL.personalShirt, s.blick, s.schritt);
+  });
 }
 
 // --- Bedienebene zeichnen ---
@@ -1978,18 +2018,31 @@ function drawHud() {
     );
   } else {
     const personalBtn = getPersonalButtonRect();
-    ctx.fillStyle = state.staffed ? '#2f5d3a' : '#1c3d54';
+    const teamVoll = state.staff >= MAX_STAFF;
+    const lohnBezahlbar = !teamVoll && state.money >= nextStaffCost();
+    ctx.fillStyle = teamVoll ? '#2f5d3a' : lohnBezahlbar ? '#1c3d54' : '#16293a';
     ctx.beginPath();
     ctx.roundRect(personalBtn.x, personalBtn.y, personalBtn.w, personalBtn.h, 10);
     ctx.fill();
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = teamVoll || lohnBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
     ctx.font = `bold ${Math.max(12, personalBtn.w * 0.1)}px sans-serif`;
-    ctx.fillText('👷 Personal', personalBtn.x + personalBtn.w / 2, personalBtn.y + personalBtn.h * 0.42);
-    ctx.font = `${Math.max(11, personalBtn.w * 0.09)}px sans-serif`;
+    ctx.fillText('👷 Personal', personalBtn.x + personalBtn.w / 2, personalBtn.y + personalBtn.h * 0.36);
+    ctx.font = `${Math.max(11, personalBtn.w * 0.085)}px sans-serif`;
     ctx.fillText(
-      state.staffed ? '✓ aktiv' : `${STAFF_COST}€`,
+      state.staff === 0 ? `${nextStaffCost()}€` : `${state.staff} im Dienst`,
       personalBtn.x + personalBtn.w / 2,
-      personalBtn.y + personalBtn.h * 0.72
+      personalBtn.y + personalBtn.h * 0.62
+    );
+    ctx.font = `${Math.max(10, personalBtn.w * 0.07)}px sans-serif`;
+    ctx.fillStyle = teamVoll || lohnBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
+    ctx.fillText(
+      teamVoll
+        ? `alle ${MAX_STAFF} eingestellt`
+        : state.staff === 0
+        ? 'nimmt dir Arbeit ab'
+        : `nächster: ${nextStaffCost()}€`,
+      personalBtn.x + personalBtn.w / 2,
+      personalBtn.y + personalBtn.h * 0.85
     );
 
     const buyBtn = getBuyLoungerButtonRect();
