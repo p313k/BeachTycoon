@@ -145,11 +145,18 @@ const TRASH_CHANCE = 0.25; // Chance, dass eine Liege nach dem Tag Müll hinterl
 const STAFF_COST_BASE = 600; // erster Mitarbeiter für die Liegen
 const STAFF_COST_GROWTH = 1.4; // jeder weitere will mehr Lohn
 const MAX_STAFF = 6; // mehr Leute passen nicht sinnvoll an den Strand
-const EISWAGEN_COST = 900; // Eiswagen inklusive Eismann, der von selbst verkauft
+const EISWAGEN_COST = 900; // Eiswagen inklusive erstem Eismann
+const EISMANN_COST_BASE = 500; // jeder weitere Eismann
+const EISMANN_COST_GROWTH = 1.3;
+const MAX_EISMAENNER = 5;
 const EIS_PREIS = 8; // was ein Eis am Gast einbringt
-const BOOTSVERLEIH_COST = 1200; // Hütte am Ufer samt Booten
+
+const BOOTSVERLEIH_COST = 1200; // Hütte am Ufer inklusive der ersten Boote
+const BOOT_START = 3; // so viele Boote gehören zur Hütte
+const BOOT_COST_BASE = 400; // jedes weitere Boot
+const BOOT_COST_GROWTH = 1.3;
+const MAX_BOOTE = 8;
 const BOOT_PREIS = 20; // eine Ausfahrt
-const BOOT_ANZAHL = 3; // so viele Boote liegen bereit
 const BOOT_FAHRT_MS = 7000; // wie lange eine Ausfahrt dauert
 
 const UPGRADES = {
@@ -226,8 +233,16 @@ function loadState() {
         seasonStartMoney: parsed.seasonStartMoney || 0,
         dayStartTime: parsed.dayStartTime || Date.now(),
         staff: typeof parsed.staff === 'number' ? Math.min(MAX_STAFF, Math.max(0, Math.round(parsed.staff))) : parsed.staffed === true ? 1 : 0,
-        eiswagen: parsed.eiswagen === true,
-        bootsverleih: parsed.bootsverleih === true,
+        eismaenner: typeof parsed.eismaenner === 'number'
+          ? Math.min(MAX_EISMAENNER, Math.max(0, Math.round(parsed.eismaenner)))
+          : parsed.eiswagen === true
+          ? 1
+          : 0,
+        boote: typeof parsed.boote === 'number'
+          ? Math.min(MAX_BOOTE, Math.max(0, Math.round(parsed.boote)))
+          : parsed.bootsverleih === true
+          ? BOOT_START
+          : 0,
         view: parsed.view === 'ueber' ? 'ueber' : 'ego',
         loungerUpgrades: normalizeUpgrades(parsed.loungerUpgrades),
       };
@@ -240,8 +255,8 @@ function loadState() {
     seasonStartMoney: 0,
     dayStartTime: Date.now(),
     staff: 0,
-    eiswagen: false,
-    bootsverleih: false,
+    eismaenner: 0,
+    boote: 0,
     view: 'ego', // Ich-Perspektive, umschaltbar auf 'ueber' (Blick über den ganzen Strand)
     loungerUpgrades: defaultUpgrades(START_LOUNGER_COUNT),
   };
@@ -249,6 +264,14 @@ function loadState() {
 
 function istEgoSicht() {
   return state.view === 'ego';
+}
+
+function hatEiswagen() {
+  return state.eismaenner > 0;
+}
+
+function hatBootsverleih() {
+  return state.boote > 0;
 }
 
 const state = loadState();
@@ -268,8 +291,8 @@ function saveState() {
       seasonStartMoney: state.seasonStartMoney,
       dayStartTime: state.dayStartTime,
       staff: state.staff,
-      eiswagen: state.eiswagen,
-      bootsverleih: state.bootsverleih,
+      eismaenner: state.eismaenner,
+      boote: state.boote,
       view: state.view,
       loungerUpgrades: state.loungerUpgrades,
     })
@@ -419,7 +442,7 @@ function startNextDay() {
     l.nextBoot = null;
     l.aufSee = false;
   });
-  boote.forEach((b) => { b.aktiv = false; b.gast = null; }); // Ausfahrten enden mit dem Tag
+  bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; }); // Ausfahrten enden mit dem Tag
   saveState();
 }
 
@@ -611,8 +634,8 @@ function updateCamera() {
   // Eiswagen rechts und Bootsverleih links müssen mit ins Bild
   // Der Eiswagen steht nah an der Kamera und braucht mehr Rand als die
   // Bootshütte, die weit hinten am Ufer liegt
-  const zusatzRechts = state.eiswagen ? 6.5 : 0;
-  const zusatzLinks = state.bootsverleih ? 2.5 : 0;
+  const zusatzRechts = hatEiswagen() ? 6.5 : 0;
+  const zusatzLinks = hatBootsverleih() ? 2.5 : 0;
   const radius = Math.max(g.width / 2 + Math.max(zusatzRechts, zusatzLinks), g.depth / 2);
   // Fester Neigungswinkel: flach genug, dass Meer und Himmel im Bild bleiben,
   // steil genug, dass die hinteren Reihen nicht hinter den vorderen verschwinden
@@ -953,7 +976,8 @@ function drawLounger(index) {
 // --- Eiswagen: steht rechts neben den Liegen, der Eismann gehört dazu ---
 function eiswagenWorld() {
   const g = getGrid();
-  return { x: g.width / 2 + 3.4, z: g.depth / 2 - 1.2 };
+  // nah genug am Strand und weit genug hinten, dass er im Bildausschnitt bleibt
+  return { x: g.width / 2 + 2.8, z: g.depth / 2 - 2.2 };
 }
 
 // Platz vor dem Verkaufsfenster, dorthin kehrt der Eismann zurück
@@ -1026,12 +1050,19 @@ function drawBootsverleih() {
 }
 
 // --- Boote: fahren mit einem Gast raus und kommen zurück ---
-const boote = Array.from({ length: BOOT_ANZAHL }, (_, i) => ({ bahn: i, aktiv: false, t: 0, gast: null }));
+const bootFlotte = [];
+
+function ensureBoote() {
+  while (bootFlotte.length < state.boote) {
+    bootFlotte.push({ bahn: bootFlotte.length, aktiv: false, t: 0, gast: null });
+  }
+  bootFlotte.length = state.boote;
+}
 
 function bootPosition(bahn, t) {
   const v = bootsverleihWorld();
   const aus = Math.sin(t * Math.PI); // 0 am Steg, 1 draußen auf See
-  const seite = (bahn - (BOOT_ANZAHL - 1) / 2) * 4.5;
+  const seite = (bahn - (Math.max(1, state.boote) - 1) / 2) * 2.6;
   return {
     x: v.x + 1.6 + seite * aus + Math.sin(t * Math.PI * 2) * 2.2,
     z: v.z - 3.2 - aus * 12,
@@ -1280,7 +1311,7 @@ function schiebeAusLiegen(pos) {
   }
 
   // Die Hütte des Bootsverleihs ist ebenfalls fest
-  if (state.bootsverleih) {
+  if (hatBootsverleih()) {
     const v = bootsverleihWorld();
     const halbX = 1.45;
     const halbZ = 1.45;
@@ -1295,7 +1326,7 @@ function schiebeAusLiegen(pos) {
   }
 
   // Der Eiswagen ist ebenfalls fest
-  if (state.eiswagen) {
+  if (hatEiswagen()) {
     const w = eiswagenWorld();
     const halbX = 1.25;
     const halbZ = 2.3;
@@ -1502,72 +1533,105 @@ function updateLiegeStaff(dt) {
   }
 }
 
-// --- Eismann: läuft vom Wagen zu den Gästen, die ein Eis wollen ---
-const eismann = { x: 0, z: 0, targetIndex: null, speed: 4.2, blick: Math.PI, schritt: 0, gesetzt: false };
+// --- Eismänner: laufen vom Wagen zu den Gästen, die ein Eis wollen ---
+const eismaenner = [];
 
-function findLoungerWantingIce() {
+function ensureEismaenner() {
+  while (eismaenner.length < state.eismaenner) {
+    eismaenner.push({
+      nr: eismaenner.length,
+      x: 0,
+      z: 0,
+      targetIndex: null,
+      speed: 4.2,
+      blick: Math.PI,
+      schritt: 0,
+      gesetzt: false,
+    });
+  }
+  eismaenner.length = state.eismaenner;
+}
+
+// Gast, der ein Eis will und noch von niemandem angesteuert wird
+function findLoungerWantingIce(vergeben) {
   for (let i = 0; i < loungers.length; i++) {
+    if (vergeben.has(i)) continue;
     if (loungers[i].willEis) return i;
   }
   return -1;
 }
 
 function updateEismann(dt) {
-  if (!eismann.gesetzt) {
-    const h = eismannHeimat();
-    eismann.x = h.x;
-    eismann.z = h.z;
-    eismann.gesetzt = true;
+  ensureEismaenner();
+
+  const vergeben = new Set();
+  for (const e of eismaenner) {
+    const gueltig = e.targetIndex !== null && e.targetIndex < loungers.length && loungers[e.targetIndex].willEis;
+    if (gueltig) vergeben.add(e.targetIndex);
+    else e.targetIndex = null;
   }
 
-  const zielGueltig =
-    eismann.targetIndex !== null && eismann.targetIndex < loungers.length && loungers[eismann.targetIndex].willEis;
-  if (!zielGueltig) {
-    const gefunden = findLoungerWantingIce();
-    eismann.targetIndex = gefunden === -1 ? null : gefunden;
-  }
-
-  // Ohne Kundschaft zurück an den Wagen
   const heimat = eismannHeimat();
-  const ziel =
-    eismann.targetIndex === null
-      ? heimat
-      : (() => {
-          const w = loungerWorld(eismann.targetIndex);
-          return { x: w.x, z: w.z + 1.3 };
-        })();
 
-  const tx = ziel.x - eismann.x;
-  const tz = ziel.z - eismann.z;
-  const dist = Math.hypot(tx, tz);
-  const step = eismann.speed * (dt / 1000);
-
-  if (dist <= step || dist === 0) {
-    eismann.x = ziel.x;
-    eismann.z = ziel.z;
-    eismann.schritt = 0;
-    if (eismann.targetIndex !== null) {
-      const i = eismann.targetIndex;
-      const l = loungers[i];
-      const w = loungerWorld(i);
-      state.money += EIS_PREIS;
-      l.willEis = false;
-      l.eisGehabt = true;
-      addPopup(w.x, 1.8, w.z, `🍦 +${EIS_PREIS}€`);
-      saveState();
-      eismann.targetIndex = null;
+  for (const e of eismaenner) {
+    if (!e.gesetzt) {
+      // nebeneinander vor dem Verkaufsfenster aufstellen
+      e.x = heimat.x;
+      e.z = heimat.z + (e.nr - (Math.max(1, eismaenner.length) - 1) / 2) * 1.1;
+      e.gesetzt = true;
     }
-  } else {
-    eismann.x += (tx / dist) * step;
-    eismann.z += (tz / dist) * step;
-    eismann.blick = Math.atan2(tx, tz);
-    eismann.schritt += dt * 0.012;
+
+    if (e.targetIndex === null) {
+      const gefunden = findLoungerWantingIce(vergeben);
+      if (gefunden !== -1) {
+        e.targetIndex = gefunden;
+        vergeben.add(gefunden);
+      }
+    }
+
+    // Ohne Kundschaft zurück an den Wagen, jeder auf seinen Platz
+    const wartePlatz = { x: heimat.x, z: heimat.z + (e.nr - (Math.max(1, eismaenner.length) - 1) / 2) * 1.1 };
+    const ziel =
+      e.targetIndex === null
+        ? wartePlatz
+        : (() => {
+            const w = loungerWorld(e.targetIndex);
+            return { x: w.x, z: w.z + 1.3 };
+          })();
+
+    const tx = ziel.x - e.x;
+    const tz = ziel.z - e.z;
+    const dist = Math.hypot(tx, tz);
+    const step = e.speed * (dt / 1000);
+
+    if (dist <= step || dist === 0) {
+      e.x = ziel.x;
+      e.z = ziel.z;
+      e.schritt = 0;
+      if (e.targetIndex !== null) {
+        const i = e.targetIndex;
+        const l = loungers[i];
+        const w = loungerWorld(i);
+        state.money += EIS_PREIS;
+        l.willEis = false;
+        l.eisGehabt = true;
+        addPopup(w.x, 1.8, w.z, `🍦 +${EIS_PREIS}€`);
+        saveState();
+        vergeben.delete(i);
+        e.targetIndex = null;
+      }
+    } else {
+      e.x += (tx / dist) * step;
+      e.z += (tz / dist) * step;
+      e.blick = Math.atan2(tx, tz);
+      e.schritt += dt * 0.012;
+    }
   }
 }
 
 // Gäste auf gebuchten Liegen bekommen im Lauf des Tages Lust auf ein Eis
 function updateEisWuensche(now) {
-  if (!state.eiswagen) return;
+  if (!hatEiswagen()) return;
   for (const l of loungers) {
     if (!l.booked) {
       l.nextEis = null;
@@ -1584,7 +1648,8 @@ function updateEisWuensche(now) {
 
 // Gäste auf gebuchten Liegen bekommen Lust auf eine Bootsfahrt; freie Boote fahren los
 function updateBootsverleih(dt, now) {
-  if (!state.bootsverleih) return;
+  if (!hatBootsverleih()) return;
+  ensureBoote(); // auch nach dem Laden eines Spielstands
 
   for (const l of loungers) {
     if (!l.booked) {
@@ -1600,7 +1665,7 @@ function updateBootsverleih(dt, now) {
   }
 
   // Wartende Gäste auf freie Boote verteilen
-  for (const b of boote) {
+  for (const b of bootFlotte) {
     if (b.aktiv) continue;
     const i = loungers.findIndex((l) => l.willBoot);
     if (i === -1) break;
@@ -1614,7 +1679,7 @@ function updateBootsverleih(dt, now) {
   }
 
   // Laufende Ausfahrten
-  for (const b of boote) {
+  for (const b of bootFlotte) {
     if (!b.aktiv) continue;
     b.t += dt / BOOT_FAHRT_MS;
     if (b.t >= 1) {
@@ -1630,23 +1695,44 @@ function updateBootsverleih(dt, now) {
   }
 }
 
+// Erst die Hütte samt Startbooten, danach einzelne Boote
+function nextBootCost() {
+  if (state.boote === 0) return BOOTSVERLEIH_COST;
+  return Math.round(BOOT_COST_BASE * Math.pow(BOOT_COST_GROWTH, state.boote - BOOT_START));
+}
+
 function buyBootsverleih() {
-  if (state.bootsverleih) return;
-  if (state.money < BOOTSVERLEIH_COST) return;
-  state.money -= BOOTSVERLEIH_COST;
-  state.bootsverleih = true;
+  if (state.boote >= MAX_BOOTE) return;
+  const cost = nextBootCost();
+  if (state.money < cost) return;
+  state.money -= cost;
   const v = bootsverleihWorld();
-  addPopup(v.x, 3.0, v.z, '🚤 Bootsverleih!');
+  if (state.boote === 0) {
+    state.boote = BOOT_START;
+    addPopup(v.x, 3.0, v.z, '🚤 Bootsverleih!');
+  } else {
+    state.boote += 1;
+    addPopup(v.x, 3.0, v.z, '🚤 +1 Boot');
+  }
+  ensureBoote();
   saveState();
 }
 
+// Erst der Wagen samt erstem Eismann, danach weitere Verkäufer
+function nextEismannCost() {
+  if (state.eismaenner === 0) return EISWAGEN_COST;
+  return Math.round(EISMANN_COST_BASE * Math.pow(EISMANN_COST_GROWTH, state.eismaenner - 1));
+}
+
 function buyEiswagen() {
-  if (state.eiswagen) return;
-  if (state.money < EISWAGEN_COST) return;
-  state.money -= EISWAGEN_COST;
-  state.eiswagen = true;
+  if (state.eismaenner >= MAX_EISMAENNER) return;
+  const cost = nextEismannCost();
+  if (state.money < cost) return;
+  state.money -= cost;
   const w = eiswagenWorld();
-  addPopup(w.x, 3.8, w.z, '🍦 Eiswagen!');
+  addPopup(w.x, 3.8, w.z, state.eismaenner === 0 ? '🍦 Eiswagen!' : '🍦 +1 Eismann');
+  state.eismaenner += 1;
+  ensureEismaenner();
   saveState();
 }
 
@@ -1659,8 +1745,8 @@ function resetGame() {
   state.seasonStartMoney = 0;
   state.dayStartTime = Date.now();
   state.staff = 0;
-  state.eiswagen = false;
-  state.bootsverleih = false;
+  state.eismaenner = 0;
+  state.boote = 0;
   state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
   clearSave(SAVE_KEY); // löscht auch ein altes Cookie, sonst käme der Spielstand zurück
   saveState();
@@ -1834,7 +1920,7 @@ function update(now) {
     cleanNearbyLoungers();
     if (state.staff > 0) updateLiegeStaff(dt);
     updateEisWuensche(now);
-    if (state.eiswagen) updateEismann(dt);
+    if (hatEiswagen()) updateEismann(dt);
     updateBootsverleih(dt, now);
   }
 
@@ -1867,13 +1953,15 @@ function drawScene() {
 
   drawBeach();
   for (let i = 0; i < loungers.length; i++) drawLounger(i);
-  if (state.eiswagen) {
+  if (hatEiswagen()) {
     drawEiswagen();
-    drawPerson(eismann.x, eismann.z, COL.eismannShirt, eismann.blick, eismann.schritt);
+    eismaenner.forEach((e) => {
+      if (e.gesetzt) drawPerson(e.x, e.z, COL.eismannShirt, e.blick, e.schritt);
+    });
   }
-  if (state.bootsverleih) {
+  if (hatBootsverleih()) {
     drawBootsverleih();
-    boote.forEach((b) => { if (b.aktiv) drawBoot(b); });
+    bootFlotte.forEach((b) => { if (b.aktiv) drawBoot(b); });
   }
   // In der Ich-Perspektive steckt die Kamera im Kopf – die eigene Figur bliebe im Weg
   if (!istEgoSicht()) drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
@@ -2065,50 +2153,62 @@ function drawHud() {
 
     // Eiswagen inklusive Eismann
     const eisBtn = getEiswagenButtonRect();
-    const eisDa = state.eiswagen;
-    const eisBezahlbar = !eisDa && state.money >= EISWAGEN_COST;
-    ctx.fillStyle = eisDa ? '#2f5d3a' : eisBezahlbar ? '#1c3d54' : '#16293a';
+    const eisVoll = state.eismaenner >= MAX_EISMAENNER;
+    const eisBezahlbar = !eisVoll && state.money >= nextEismannCost();
+    ctx.fillStyle = eisVoll ? '#2f5d3a' : eisBezahlbar ? '#1c3d54' : '#16293a';
     ctx.beginPath();
     ctx.roundRect(eisBtn.x, eisBtn.y, eisBtn.w, eisBtn.h, 10);
     ctx.fill();
-    ctx.fillStyle = eisDa || eisBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
+    ctx.fillStyle = eisVoll || eisBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
     ctx.font = `bold ${Math.max(12, eisBtn.w * 0.1)}px sans-serif`;
     ctx.fillText('🍦 Eiswagen', eisBtn.x + eisBtn.w / 2, eisBtn.y + eisBtn.h * 0.36);
     ctx.font = `${Math.max(11, eisBtn.w * 0.085)}px sans-serif`;
     ctx.fillText(
-      eisDa ? '✓ verkauft Eis' : `${EISWAGEN_COST}€`,
+      state.eismaenner === 0
+        ? `${EISWAGEN_COST}€`
+        : `${state.eismaenner} ${state.eismaenner === 1 ? 'Eismann' : 'Eismänner'}`,
       eisBtn.x + eisBtn.w / 2,
       eisBtn.y + eisBtn.h * 0.62
     );
     ctx.font = `${Math.max(10, eisBtn.w * 0.07)}px sans-serif`;
-    ctx.fillStyle = eisDa || eisBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
+    ctx.fillStyle = eisVoll || eisBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
     ctx.fillText(
-      eisDa ? `${EIS_PREIS}€ pro Eis` : `Eismann inklusive · ${EIS_PREIS}€/Eis`,
+      eisVoll
+        ? `alle ${MAX_EISMAENNER} · ${EIS_PREIS}€/Eis`
+        : state.eismaenner === 0
+        ? `Eismann inklusive · ${EIS_PREIS}€/Eis`
+        : `nächster: ${nextEismannCost()}€`,
       eisBtn.x + eisBtn.w / 2,
       eisBtn.y + eisBtn.h * 0.85
     );
 
     // Bootsverleih am Ufer
     const bootBtn = getBootsverleihButtonRect();
-    const bootDa = state.bootsverleih;
-    const bootBezahlbar = !bootDa && state.money >= BOOTSVERLEIH_COST;
-    ctx.fillStyle = bootDa ? '#2f5d3a' : bootBezahlbar ? '#1c3d54' : '#16293a';
+    const bootVoll = state.boote >= MAX_BOOTE;
+    const bootBezahlbar = !bootVoll && state.money >= nextBootCost();
+    ctx.fillStyle = bootVoll ? '#2f5d3a' : bootBezahlbar ? '#1c3d54' : '#16293a';
     ctx.beginPath();
     ctx.roundRect(bootBtn.x, bootBtn.y, bootBtn.w, bootBtn.h, 10);
     ctx.fill();
-    ctx.fillStyle = bootDa || bootBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
+    ctx.fillStyle = bootVoll || bootBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
     ctx.font = `bold ${Math.max(12, bootBtn.w * 0.1)}px sans-serif`;
     ctx.fillText('🚤 Bootsverleih', bootBtn.x + bootBtn.w / 2, bootBtn.y + bootBtn.h * 0.36);
     ctx.font = `${Math.max(11, bootBtn.w * 0.085)}px sans-serif`;
     ctx.fillText(
-      bootDa ? `${boote.filter((b) => b.aktiv).length}/${BOOT_ANZAHL} unterwegs` : `${BOOTSVERLEIH_COST}€`,
+      state.boote === 0
+        ? `${BOOTSVERLEIH_COST}€`
+        : `${bootFlotte.filter((b) => b.aktiv).length}/${state.boote} unterwegs`,
       bootBtn.x + bootBtn.w / 2,
       bootBtn.y + bootBtn.h * 0.62
     );
     ctx.font = `${Math.max(10, bootBtn.w * 0.07)}px sans-serif`;
-    ctx.fillStyle = bootDa || bootBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
+    ctx.fillStyle = bootVoll || bootBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
     ctx.fillText(
-      bootDa ? `${BOOT_PREIS}€ pro Ausfahrt` : `${BOOT_ANZAHL} Boote · ${BOOT_PREIS}€/Ausfahrt`,
+      bootVoll
+        ? `alle ${MAX_BOOTE} Boote · ${BOOT_PREIS}€`
+        : state.boote === 0
+        ? `${BOOT_START} Boote · ${BOOT_PREIS}€/Ausfahrt`
+        : `weiteres Boot: ${nextBootCost()}€`,
       bootBtn.x + bootBtn.w / 2,
       bootBtn.y + bootBtn.h * 0.85
     );
