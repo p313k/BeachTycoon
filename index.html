@@ -159,6 +159,14 @@ const MAX_BOOTE = 8;
 const BOOT_PREIS = 20; // eine Ausfahrt
 const BOOT_FAHRT_MS = 7000; // wie lange eine Ausfahrt dauert
 
+const POOL_COST = 1500; // Pool mit Liegewiese
+const POOL_PREIS = 15; // Eintritt für ein Bad
+const POOL_KAPAZITAET = 6; // so viele passen gleichzeitig ins Wasser
+const SCHWIMM_MS = 6000; // wie lange ein Gast im Wasser bleibt
+
+const CLUBHAUS_COST = 2000; // hebt den Tagespreis jeder Liege
+const CLUBHAUS_BONUS = 6;
+
 const UPGRADES = {
   schirm: { name: 'Sonnenschirm', icon: '☂️', cost: 80, bonus: 8 },
   tisch: { name: 'Beistelltisch', icon: '🪑', cost: 50, bonus: 5 },
@@ -238,6 +246,8 @@ function loadState() {
           : parsed.eiswagen === true
           ? 1
           : 0,
+        pool: parsed.pool === true,
+        clubhaus: parsed.clubhaus === true,
         boote: typeof parsed.boote === 'number'
           ? Math.min(MAX_BOOTE, Math.max(0, Math.round(parsed.boote)))
           : parsed.bootsverleih === true
@@ -257,6 +267,8 @@ function loadState() {
     staff: 0,
     eismaenner: 0,
     boote: 0,
+    pool: false,
+    clubhaus: false,
     view: 'ego', // Ich-Perspektive, umschaltbar auf 'ueber' (Blick über den ganzen Strand)
     loungerUpgrades: defaultUpgrades(START_LOUNGER_COUNT),
   };
@@ -293,6 +305,8 @@ function saveState() {
       staff: state.staff,
       eismaenner: state.eismaenner,
       boote: state.boote,
+      pool: state.pool,
+      clubhaus: state.clubhaus,
       view: state.view,
       loungerUpgrades: state.loungerUpgrades,
     })
@@ -305,7 +319,7 @@ function addPopup(x, y, z, text) {
 
 function loungerPrice(i) {
   const u = state.loungerUpgrades[i];
-  let price = BASE_BOOKING_PRICE;
+  let price = BASE_BOOKING_PRICE + (state.clubhaus ? CLUBHAUS_BONUS : 0);
   UPGRADE_KEYS.forEach((k) => {
     if (u[k]) price += UPGRADES[k].bonus;
   });
@@ -327,6 +341,12 @@ function makeLounger() {
     bootGehabt: false,
     nextBoot: null,
     aufSee: false, // Gast ist gerade mit einem Boot draußen
+    willPool: false, // Gast möchte schwimmen
+    poolGehabt: false,
+    nextPool: null,
+    imPool: false,
+    poolPlatz: 0,
+    schwimmBis: 0,
   };
 }
 
@@ -441,6 +461,10 @@ function startNextDay() {
     l.bootGehabt = false;
     l.nextBoot = null;
     l.aufSee = false;
+    l.willPool = false;
+    l.poolGehabt = false;
+    l.nextPool = null;
+    l.imPool = false;
   });
   bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; }); // Ausfahrten enden mit dem Tag
   saveState();
@@ -635,14 +659,16 @@ function updateCamera() {
   // Der Eiswagen steht nah an der Kamera und braucht mehr Rand als die
   // Bootshütte, die weit hinten am Ufer liegt
   const zusatzRechts = hatEiswagen() ? 6.5 : 0;
-  const zusatzLinks = hatBootsverleih() ? 2.5 : 0;
+  const zusatzLinks = Math.max(hatBootsverleih() ? 2.5 : 0, state.pool ? 3.5 : 0, state.clubhaus ? 8.5 : 0);
+  // Pool und Clubhaus stehen vorn, dafür muss die Kamera weiter zurück
+  const zusatzVorn = state.pool ? 5.5 : 0;
   const radius = Math.max(g.width / 2 + Math.max(zusatzRechts, zusatzLinks), g.depth / 2);
   // Fester Neigungswinkel: flach genug, dass Meer und Himmel im Bild bleiben,
   // steil genug, dass die hinteren Reihen nicht hinter den vorderen verschwinden
   const neigung = (16 * Math.PI) / 180;
-  const target = [(zusatzRechts - zusatzLinks) / 2, 1.1, -g.depth * 0.12];
+  const target = [(zusatzRechts - zusatzLinks) / 2, 1.1, -g.depth * 0.12 + zusatzVorn * 0.5];
   // Mindestabstand, damit die Figur bei kleinem Strand nicht das halbe Bild füllt
-  const abstand = Math.max(13, g.depth * 0.5 + radius * 0.6 + 7.5);
+  const abstand = Math.max(13, g.depth * 0.5 + radius * 0.6 + 7.5 + zusatzVorn * 0.7);
   cameraEye = [target[0], target[1] + abstand * Math.tan(neigung), target[2] + abstand];
 
   // Freier Streifen zwischen Kopfzeile und Bedienleiste
@@ -883,6 +909,15 @@ const COL = {
   bootRumpf: [0.94, 0.95, 0.97],
   bootDeck: [0.75, 0.58, 0.38],
   bootKabine: [0.28, 0.55, 0.72],
+  // Pool
+  poolRand: [0.93, 0.93, 0.95],
+  poolWasser: [0.24, 0.68, 0.85],
+  poolLinie: [0.85, 0.92, 0.96],
+  // Clubhaus
+  club: [0.95, 0.92, 0.85],
+  clubBand: [0.24, 0.5, 0.62],
+  clubDach: [0.6, 0.32, 0.28],
+  clubTuer: [0.42, 0.3, 0.22],
 };
 
 // --- Figuren ---
@@ -962,7 +997,7 @@ function drawLounger(index) {
     l.trash.forEach((t) => {
       box([w.x + t.dx, MATTRESS_Y + 0.1, w.z + t.dz], [t.size, t.size, t.size], COL.muell, t.rot, 0);
     });
-  } else if (l.booked && !l.aufSee) {
+  } else if (l.booked && !l.aufSee && !l.imPool) {
     drawLiegenderGast(w.x, w.z + 0.15, breit);
   } else if (l.waiting) {
     drawPerson(w.x + breite * 0.5 + 0.9, w.z + 0.9, COL.gastShirt, Math.PI, 0);
@@ -1086,6 +1121,93 @@ function drawBoot(b) {
   box([p.x - Math.sin(blick) * 1.9, -0.06, p.z - Math.cos(blick) * 1.9], [1.3, 0.06, 1.4], COL.schaum, blick, 0);
 }
 
+// --- Pool: vorn links auf dem Sand ---
+function poolWorld() {
+  const g = getGrid();
+  return { x: -g.width / 2 + 2.0, z: g.depth / 2 + 4.6 };
+}
+
+const POOL_HALB_X = 3.0;
+const POOL_HALB_Z = 2.0;
+
+// Platz eines Schwimmers im Becken
+function poolPlatzWorld(platz) {
+  const p = poolWorld();
+  const spalte = platz % 3;
+  const reihe = Math.floor(platz / 3);
+  return { x: p.x + (spalte - 1) * 1.7, z: p.z + (reihe - 0.5) * 1.8 };
+}
+
+function drawPool() {
+  const p = poolWorld();
+  // Beckenrand als Rahmen aus vier Leisten – ein Vollkörper würde das Wasser verdecken
+  const rand = 0.45;
+  [-1, 1].forEach((s) => {
+    box([p.x + s * (POOL_HALB_X + rand / 2), 0.14, p.z], [rand, 0.34, POOL_HALB_Z * 2 + rand * 2], COL.poolRand, 0, 0);
+    box([p.x, 0.14, p.z + s * (POOL_HALB_Z + rand / 2)], [POOL_HALB_X * 2, 0.34, rand], COL.poolRand, 0, 0);
+  });
+  // Wasser, etwas tiefer als der Rand
+  box([p.x, 0.09, p.z], [POOL_HALB_X * 2, 0.3, POOL_HALB_Z * 2], COL.poolWasser, 0, 0);
+  // Beckenlinien
+  [-1, 1].forEach((s) => {
+    box([p.x + s * POOL_HALB_X * 0.5, 0.23, p.z], [0.12, 0.02, POOL_HALB_Z * 1.8], COL.poolLinie, 0, 0);
+  });
+  // Leiter am hinteren Rand
+  [-0.3, 0.3].forEach((dx) => {
+    box([p.x + dx, 0.42, p.z - POOL_HALB_Z - 0.3], [0.08, 0.7, 0.08], COL.gestell, 0, 0);
+  });
+  box([p.x, 0.72, p.z - POOL_HALB_Z - 0.3], [0.75, 0.07, 0.1], COL.gestell, 0, 0);
+
+  // Schwimmer: Kopf und Schultern über der Wasseroberfläche
+  loungers.forEach((l) => {
+    if (!l.imPool) return;
+    const s = poolPlatzWorld(l.poolPlatz);
+    const wippen = Math.sin(zeitMs * 0.005 + l.poolPlatz) * 0.05;
+    const rudern = Math.sin(zeitMs * 0.006 + l.poolPlatz * 2) * 0.12;
+    // über Wasser sieht man Schultern, Kopf und die Arme beim Schwimmen
+    box([s.x, 0.23 + wippen, s.z], [0.44, 0.16, 0.5], COL.hautGast, 0, 0);
+    box([s.x - 0.32, 0.22 + wippen, s.z + rudern], [0.22, 0.12, 0.34], COL.hautGast, 0, 0);
+    box([s.x + 0.32, 0.22 + wippen, s.z - rudern], [0.22, 0.12, 0.34], COL.hautGast, 0, 0);
+    box([s.x, 0.37 + wippen, s.z - 0.16], [0.3, 0.3, 0.3], COL.hautGast, 0, 0);
+    box([s.x, 0.52 + wippen, s.z - 0.18], [0.32, 0.09, 0.3], COL.haar, 0, 0);
+  });
+}
+
+// --- Clubhaus: vorn rechts, mit Terrasse ---
+// Steht seitlich neben dem Strand, nicht davor: ein hohes Gebäude im Vordergrund
+// würde die halben Liegen verdecken, und rechts steht schon der Eiswagen
+function clubhausWorld() {
+  const g = getGrid();
+  return { x: -g.width / 2 - 4.4, z: g.depth / 2 + 1.2 };
+}
+
+function drawClubhaus() {
+  const c = clubhausWorld();
+  shadow(c.x, c.z, 5.4);
+
+  // Terrasse mit Geländer
+  box([c.x, 0.16, c.z + 1.9], [5.0, 0.24, 2.2], COL.holz, 0, 0);
+  for (let i = -2; i <= 2; i++) {
+    box([c.x + i * 1.15, 0.5, c.z + 2.9], [0.1, 0.6, 0.1], COL.holzDunkel, 0, 0);
+  }
+  box([c.x, 0.8, c.z + 2.9], [5.0, 0.1, 0.12], COL.holzDunkel, 0, 0);
+
+  // Erdgeschoss und Obergeschoss
+  box([c.x, 1.1, c.z], [4.6, 2.2, 3.4], COL.club, 0, 0);
+  box([c.x, 2.32, c.z], [4.9, 0.24, 3.7], COL.clubBand, 0, 0);
+  box([c.x, 3.15, c.z - 0.2], [3.8, 1.5, 2.9], COL.club, 0, 0);
+  box([c.x, 3.98, c.z - 0.2], [4.1, 0.2, 3.2], COL.clubDach, 0, 0);
+
+  // Fenster und Tür zur Terrasse
+  box([c.x - 1.2, 1.35, c.z + 1.72], [1.5, 1.1, 0.08], COL.fenster, 0, 0);
+  box([c.x + 1.3, 1.0, c.z + 1.72], [1.1, 1.9, 0.08], COL.clubTuer, 0, 0);
+  box([c.x, 3.2, c.z + 1.25], [2.6, 0.9, 0.08], COL.fenster, 0, 0);
+
+  // Fahne auf dem Dach
+  box([c.x + 1.5, 4.6, c.z - 0.2], [0.08, 1.2, 0.08], COL.gestell, 0, 0);
+  box([c.x + 1.9, 5.0, c.z - 0.2], [0.75, 0.45, 0.05], COL.markise, 0, 0);
+}
+
 // --- Strand und Meer ---
 function drawBeach() {
   const g = getGrid();
@@ -1186,12 +1308,20 @@ function getViewButtonRect() {
   return { x: reset.x - 134, y: 18, w: 126, h: 28 };
 }
 
-// Drei Kacheln nebeneinander: Personal, neue Liege, Eiswagen
+// Sechs Kacheln als 3x2-Raster: Personal, Liege, Eiswagen, Boote, Pool, Clubhaus
 function getShopSlotRect(index) {
   const area = getShopContentRect();
-  const pad = 10;
-  const breite = (area.w - pad * 4) / 4;
-  return { x: area.x + index * (breite + pad), y: area.y + pad, w: breite, h: area.h - pad * 2 };
+  const pad = 8;
+  const cols = 3;
+  const rows = 2;
+  const cw = (area.w - pad * (cols + 1)) / cols;
+  const ch = (area.h - pad * (rows + 1)) / rows;
+  return {
+    x: area.x + pad + (index % cols) * (cw + pad),
+    y: area.y + pad + Math.floor(index / cols) * (ch + pad),
+    w: cw,
+    h: ch,
+  };
 }
 
 function getPersonalButtonRect() {
@@ -1208,6 +1338,14 @@ function getEiswagenButtonRect() {
 
 function getBootsverleihButtonRect() {
   return getShopSlotRect(3);
+}
+
+function getPoolButtonRect() {
+  return getShopSlotRect(4);
+}
+
+function getClubhausButtonRect() {
+  return getShopSlotRect(5);
 }
 
 // Ausbau-Panel: 3x2 Kacheln (5 Ausbauten + Fertig-Knopf)
@@ -1310,6 +1448,34 @@ function schiebeAusLiegen(pos) {
     }
   }
 
+  // Pool und Clubhaus sind fest
+  if (state.pool) {
+    const p = poolWorld();
+    const halbX = POOL_HALB_X + 0.5;
+    const halbZ = POOL_HALB_Z + 0.5;
+    const dx = pos.x - p.x;
+    const dz = pos.z - p.z;
+    const dX = halbX - Math.abs(dx);
+    const dZ = halbZ - Math.abs(dz);
+    if (dX > 0 && dZ > 0) {
+      if (dX < dZ) pos.x = p.x + Math.sign(dx || 1) * halbX;
+      else pos.z = p.z + Math.sign(dz || -1) * halbZ;
+    }
+  }
+  if (state.clubhaus) {
+    const c = clubhausWorld();
+    const halbX = 2.5;
+    const halbZ = 3.2;
+    const dx = pos.x - c.x;
+    const dz = pos.z - c.z;
+    const dX = halbX - Math.abs(dx);
+    const dZ = halbZ - Math.abs(dz);
+    if (dX > 0 && dZ > 0) {
+      if (dX < dZ) pos.x = c.x + Math.sign(dx || 1) * halbX;
+      else pos.z = c.z + Math.sign(dz || -1) * halbZ;
+    }
+  }
+
   // Die Hütte des Bootsverleihs ist ebenfalls fest
   if (hatBootsverleih()) {
     const v = bootsverleihWorld();
@@ -1344,7 +1510,8 @@ function schiebeAusLiegen(pos) {
 
 function beachBounds() {
   const g = getGrid();
-  return { x: g.width / 2 + 3.5, zMin: -g.depth / 2 - 3.5, zMax: g.depth / 2 + 4.5 };
+  const vorn = state.pool || state.clubhaus ? 9.0 : 4.5; // Platz vor Pool und Clubhaus
+  return { x: g.width / 2 + 3.5, zMin: -g.depth / 2 - 3.5, zMax: g.depth / 2 + vorn };
 }
 
 function updatePlayer(dt) {
@@ -1724,6 +1891,69 @@ function nextEismannCost() {
   return Math.round(EISMANN_COST_BASE * Math.pow(EISMANN_COST_GROWTH, state.eismaenner - 1));
 }
 
+// Gäste auf gebuchten Liegen gehen zwischendurch schwimmen
+function updatePool(now) {
+  if (!state.pool) return;
+
+  for (const l of loungers) {
+    if (!l.booked) {
+      l.nextPool = null;
+      continue;
+    }
+    if (l.willPool || l.poolGehabt || l.imPool || l.aufSee) continue;
+    if (l.nextPool === null) {
+      l.nextPool = now + randomDelay(DAY_DURATION_MS * 0.1, DAY_DURATION_MS * 0.65);
+    } else if (now >= l.nextPool) {
+      l.willPool = true;
+    }
+  }
+
+  // Einlass, solange Platz im Becken ist
+  const belegtePlaetze = new Set(loungers.filter((l) => l.imPool).map((l) => l.poolPlatz));
+  for (const l of loungers) {
+    if (!l.willPool) continue;
+    if (belegtePlaetze.size >= POOL_KAPAZITAET) break;
+    let platz = 0;
+    while (belegtePlaetze.has(platz)) platz++;
+    belegtePlaetze.add(platz);
+    l.willPool = false;
+    l.imPool = true;
+    l.poolPlatz = platz;
+    l.schwimmBis = now + SCHWIMM_MS;
+  }
+
+  // Fertig geschwommen: Eintritt kassieren
+  for (const l of loungers) {
+    if (!l.imPool || now < l.schwimmBis) continue;
+    const p = poolWorld();
+    state.money += POOL_PREIS;
+    l.imPool = false;
+    l.poolGehabt = true;
+    addPopup(p.x, 1.6, p.z, `🏊 +${POOL_PREIS}€`);
+    saveState();
+  }
+}
+
+function buyPool() {
+  if (state.pool) return;
+  if (state.money < POOL_COST) return;
+  state.money -= POOL_COST;
+  state.pool = true;
+  const p = poolWorld();
+  addPopup(p.x, 1.8, p.z, '🏊 Pool!');
+  saveState();
+}
+
+function buyClubhaus() {
+  if (state.clubhaus) return;
+  if (state.money < CLUBHAUS_COST) return;
+  state.money -= CLUBHAUS_COST;
+  state.clubhaus = true;
+  const c = clubhausWorld();
+  addPopup(c.x, 5.4, c.z, '🏛️ Clubhaus!');
+  saveState();
+}
+
 function buyEiswagen() {
   if (state.eismaenner >= MAX_EISMAENNER) return;
   const cost = nextEismannCost();
@@ -1747,6 +1977,8 @@ function resetGame() {
   state.staff = 0;
   state.eismaenner = 0;
   state.boote = 0;
+  state.pool = false;
+  state.clubhaus = false;
   state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
   clearSave(SAVE_KEY); // löscht auch ein altes Cookie, sonst käme der Spielstand zurück
   saveState();
@@ -1826,6 +2058,14 @@ hud.addEventListener('pointerdown', (e) => {
     }
     if (pointInRect(px, py, getBootsverleihButtonRect())) {
       buyBootsverleih();
+      return;
+    }
+    if (pointInRect(px, py, getPoolButtonRect())) {
+      buyPool();
+      return;
+    }
+    if (pointInRect(px, py, getClubhausButtonRect())) {
+      buyClubhaus();
       return;
     }
   }
@@ -1922,6 +2162,7 @@ function update(now) {
     updateEisWuensche(now);
     if (hatEiswagen()) updateEismann(dt);
     updateBootsverleih(dt, now);
+    updatePool(now);
   }
 
   popups = popups.filter((p) => {
@@ -1959,6 +2200,8 @@ function drawScene() {
       if (e.gesetzt) drawPerson(e.x, e.z, COL.eismannShirt, e.blick, e.schritt);
     });
   }
+  if (state.pool) drawPool();
+  if (state.clubhaus) drawClubhaus();
   if (hatBootsverleih()) {
     drawBootsverleih();
     bootFlotte.forEach((b) => { if (b.aktiv) drawBoot(b); });
@@ -1968,6 +2211,26 @@ function drawScene() {
   liegeStaffs.forEach((s) => {
     if (s.gesetzt) drawPerson(s.x, s.z, COL.personalShirt, s.blick, s.schritt);
   });
+}
+
+// Eine Kachel der Bedienleiste: Titel, aktueller Stand, Hinweis darunter
+function drawShopButton(rect, titel, info) {
+  const bezahlbar = !info.voll && state.money >= info.preis;
+  ctx.fillStyle = info.voll ? '#2f5d3a' : bezahlbar ? '#1c3d54' : '#16293a';
+  ctx.beginPath();
+  ctx.roundRect(rect.x, rect.y, rect.w, rect.h, 10);
+  ctx.fill();
+
+  const mitte = rect.x + rect.w / 2;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = info.voll || bezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
+  ctx.font = `bold ${Math.max(12, Math.min(17, rect.w * 0.095))}px sans-serif`;
+  ctx.fillText(titel, mitte, rect.y + rect.h * 0.33);
+  ctx.font = `${Math.max(11, Math.min(15, rect.w * 0.08))}px sans-serif`;
+  ctx.fillText(info.stand, mitte, rect.y + rect.h * 0.62);
+  ctx.font = `${Math.max(9, Math.min(12, rect.w * 0.062))}px sans-serif`;
+  ctx.fillStyle = info.voll || bezahlbar ? 'rgba(255, 255, 255, 0.7)' : 'rgba(255, 255, 255, 0.32)';
+  ctx.fillText(info.hinweis, mitte, rect.y + rect.h * 0.87);
 }
 
 // --- Bedienebene zeichnen ---
@@ -2001,10 +2264,10 @@ function drawHud() {
   // Hintere Reihen zuerst, damit vordere Schilder oben liegen.
   const schilder = [];
   loungers.forEach((l, i) => {
-    if (!l.waiting && !l.willEis && !l.willBoot) return;
+    if (!l.waiting && !l.willEis && !l.willBoot && !l.willPool) return;
     const w = loungerWorld(i);
     const p = worldToScreen(w.x, 1.15, w.z + 0.9);
-    if (p) schilder.push({ p, text: l.waiting ? `${loungerPrice(i)}€` : l.willEis ? '🍦' : '🚤' });
+    if (p) schilder.push({ p, text: l.waiting ? `${loungerPrice(i)}€` : l.willEis ? '🍦' : l.willBoot ? '🚤' : '🏊' });
   });
   schilder.sort((a, b) => a.p.y - b.p.y);
   ctx.font = 'bold 13px sans-serif';
@@ -2105,113 +2368,71 @@ function drawHud() {
       closeBtn.y + closeBtn.h * 0.75
     );
   } else {
-    const personalBtn = getPersonalButtonRect();
-    const teamVoll = state.staff >= MAX_STAFF;
-    const lohnBezahlbar = !teamVoll && state.money >= nextStaffCost();
-    ctx.fillStyle = teamVoll ? '#2f5d3a' : lohnBezahlbar ? '#1c3d54' : '#16293a';
-    ctx.beginPath();
-    ctx.roundRect(personalBtn.x, personalBtn.y, personalBtn.w, personalBtn.h, 10);
-    ctx.fill();
-    ctx.fillStyle = teamVoll || lohnBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
-    ctx.font = `bold ${Math.max(12, personalBtn.w * 0.1)}px sans-serif`;
-    ctx.fillText('👷 Personal', personalBtn.x + personalBtn.w / 2, personalBtn.y + personalBtn.h * 0.36);
-    ctx.font = `${Math.max(11, personalBtn.w * 0.085)}px sans-serif`;
-    ctx.fillText(
-      state.staff === 0 ? `${nextStaffCost()}€` : `${state.staff} im Dienst`,
-      personalBtn.x + personalBtn.w / 2,
-      personalBtn.y + personalBtn.h * 0.62
-    );
-    ctx.font = `${Math.max(10, personalBtn.w * 0.07)}px sans-serif`;
-    ctx.fillStyle = teamVoll || lohnBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
-    ctx.fillText(
-      teamVoll
-        ? `alle ${MAX_STAFF} eingestellt`
-        : state.staff === 0
-        ? 'nimmt dir Arbeit ab'
-        : `nächster: ${nextStaffCost()}€`,
-      personalBtn.x + personalBtn.w / 2,
-      personalBtn.y + personalBtn.h * 0.85
-    );
+    // Sechs Kacheln: Titel, darunter der Stand, darunter der nächste Preis
+    drawShopButton(getPersonalButtonRect(), '👷 Personal', {
+      voll: state.staff >= MAX_STAFF,
+      preis: nextStaffCost(),
+      stand: state.staff === 0 ? `${nextStaffCost()}€` : `${state.staff} im Dienst`,
+      hinweis:
+        state.staff >= MAX_STAFF
+          ? `alle ${MAX_STAFF} eingestellt`
+          : state.staff === 0
+          ? 'nimmt dir Arbeit ab'
+          : `nächster: ${nextStaffCost()}€`,
+    });
 
-    const buyBtn = getBuyLoungerButtonRect();
-    const full = beachIsFull();
-    const cost = nextLoungerCost();
-    const affordable = !full && state.money >= cost;
-    ctx.fillStyle = full ? '#2f5d3a' : affordable ? '#1c3d54' : '#16293a';
-    ctx.beginPath();
-    ctx.roundRect(buyBtn.x, buyBtn.y, buyBtn.w, buyBtn.h, 10);
-    ctx.fill();
-    ctx.fillStyle = full || affordable ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
-    ctx.font = `bold ${Math.max(12, buyBtn.w * 0.1)}px sans-serif`;
-    ctx.fillText('🛏️ Neue Liege', buyBtn.x + buyBtn.w / 2, buyBtn.y + buyBtn.h * 0.42);
-    ctx.font = `${Math.max(11, buyBtn.w * 0.09)}px sans-serif`;
-    ctx.fillText(
-      full ? '✓ Strand voll' : `${cost}€ (${loungers.length}/${MAX_LOUNGER_COUNT})`,
-      buyBtn.x + buyBtn.w / 2,
-      buyBtn.y + buyBtn.h * 0.72
-    );
+    drawShopButton(getBuyLoungerButtonRect(), '🛏️ Neue Liege', {
+      voll: beachIsFull(),
+      preis: nextLoungerCost(),
+      stand: beachIsFull() ? 'Strand voll' : `${nextLoungerCost()}€`,
+      hinweis: `${loungers.length} von ${MAX_LOUNGER_COUNT} Liegen`,
+    });
 
-    // Eiswagen inklusive Eismann
-    const eisBtn = getEiswagenButtonRect();
-    const eisVoll = state.eismaenner >= MAX_EISMAENNER;
-    const eisBezahlbar = !eisVoll && state.money >= nextEismannCost();
-    ctx.fillStyle = eisVoll ? '#2f5d3a' : eisBezahlbar ? '#1c3d54' : '#16293a';
-    ctx.beginPath();
-    ctx.roundRect(eisBtn.x, eisBtn.y, eisBtn.w, eisBtn.h, 10);
-    ctx.fill();
-    ctx.fillStyle = eisVoll || eisBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
-    ctx.font = `bold ${Math.max(12, eisBtn.w * 0.1)}px sans-serif`;
-    ctx.fillText('🍦 Eiswagen', eisBtn.x + eisBtn.w / 2, eisBtn.y + eisBtn.h * 0.36);
-    ctx.font = `${Math.max(11, eisBtn.w * 0.085)}px sans-serif`;
-    ctx.fillText(
-      state.eismaenner === 0
-        ? `${EISWAGEN_COST}€`
-        : `${state.eismaenner} ${state.eismaenner === 1 ? 'Eismann' : 'Eismänner'}`,
-      eisBtn.x + eisBtn.w / 2,
-      eisBtn.y + eisBtn.h * 0.62
-    );
-    ctx.font = `${Math.max(10, eisBtn.w * 0.07)}px sans-serif`;
-    ctx.fillStyle = eisVoll || eisBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
-    ctx.fillText(
-      eisVoll
-        ? `alle ${MAX_EISMAENNER} · ${EIS_PREIS}€/Eis`
-        : state.eismaenner === 0
-        ? `Eismann inklusive · ${EIS_PREIS}€/Eis`
-        : `nächster: ${nextEismannCost()}€`,
-      eisBtn.x + eisBtn.w / 2,
-      eisBtn.y + eisBtn.h * 0.85
-    );
+    drawShopButton(getEiswagenButtonRect(), '🍦 Eiswagen', {
+      voll: state.eismaenner >= MAX_EISMAENNER,
+      preis: nextEismannCost(),
+      stand:
+        state.eismaenner === 0
+          ? `${EISWAGEN_COST}€`
+          : `${state.eismaenner} ${state.eismaenner === 1 ? 'Eismann' : 'Eismänner'}`,
+      hinweis:
+        state.eismaenner >= MAX_EISMAENNER
+          ? `alle ${MAX_EISMAENNER} · ${EIS_PREIS}€/Eis`
+          : state.eismaenner === 0
+          ? `Eismann inkl. · ${EIS_PREIS}€/Eis`
+          : `nächster: ${nextEismannCost()}€`,
+    });
 
-    // Bootsverleih am Ufer
-    const bootBtn = getBootsverleihButtonRect();
-    const bootVoll = state.boote >= MAX_BOOTE;
-    const bootBezahlbar = !bootVoll && state.money >= nextBootCost();
-    ctx.fillStyle = bootVoll ? '#2f5d3a' : bootBezahlbar ? '#1c3d54' : '#16293a';
-    ctx.beginPath();
-    ctx.roundRect(bootBtn.x, bootBtn.y, bootBtn.w, bootBtn.h, 10);
-    ctx.fill();
-    ctx.fillStyle = bootVoll || bootBezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
-    ctx.font = `bold ${Math.max(12, bootBtn.w * 0.1)}px sans-serif`;
-    ctx.fillText('🚤 Bootsverleih', bootBtn.x + bootBtn.w / 2, bootBtn.y + bootBtn.h * 0.36);
-    ctx.font = `${Math.max(11, bootBtn.w * 0.085)}px sans-serif`;
-    ctx.fillText(
-      state.boote === 0
-        ? `${BOOTSVERLEIH_COST}€`
-        : `${bootFlotte.filter((b) => b.aktiv).length}/${state.boote} unterwegs`,
-      bootBtn.x + bootBtn.w / 2,
-      bootBtn.y + bootBtn.h * 0.62
-    );
-    ctx.font = `${Math.max(10, bootBtn.w * 0.07)}px sans-serif`;
-    ctx.fillStyle = bootVoll || bootBezahlbar ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.35)';
-    ctx.fillText(
-      bootVoll
-        ? `alle ${MAX_BOOTE} Boote · ${BOOT_PREIS}€`
-        : state.boote === 0
-        ? `${BOOT_START} Boote · ${BOOT_PREIS}€/Ausfahrt`
-        : `weiteres Boot: ${nextBootCost()}€`,
-      bootBtn.x + bootBtn.w / 2,
-      bootBtn.y + bootBtn.h * 0.85
-    );
+    drawShopButton(getBootsverleihButtonRect(), '🚤 Bootsverleih', {
+      voll: state.boote >= MAX_BOOTE,
+      preis: nextBootCost(),
+      stand:
+        state.boote === 0
+          ? `${BOOTSVERLEIH_COST}€`
+          : `${bootFlotte.filter((b) => b.aktiv).length}/${state.boote} unterwegs`,
+      hinweis:
+        state.boote >= MAX_BOOTE
+          ? `alle ${MAX_BOOTE} Boote · ${BOOT_PREIS}€`
+          : state.boote === 0
+          ? `${BOOT_START} Boote · ${BOOT_PREIS}€/Fahrt`
+          : `weiteres Boot: ${nextBootCost()}€`,
+    });
+
+    drawShopButton(getPoolButtonRect(), '🏊 Pool', {
+      voll: state.pool,
+      preis: POOL_COST,
+      stand: state.pool
+        ? `${loungers.filter((l) => l.imPool).length}/${POOL_KAPAZITAET} im Wasser`
+        : `${POOL_COST}€`,
+      hinweis: state.pool ? `${POOL_PREIS}€ pro Bad` : `Eintritt ${POOL_PREIS}€ pro Gast`,
+    });
+
+    drawShopButton(getClubhausButtonRect(), '🏛️ Clubhaus', {
+      voll: state.clubhaus,
+      preis: CLUBHAUS_COST,
+      stand: state.clubhaus ? `+${CLUBHAUS_BONUS}€ je Liege` : `${CLUBHAUS_COST}€`,
+      hinweis: state.clubhaus ? 'gehobener Strand' : `alle Liegen +${CLUBHAUS_BONUS}€/Tag`,
+    });
   }
 
   // Ich-Perspektive: Fadenkreuz und was gerade davor liegt
@@ -2237,8 +2458,12 @@ function drawHud() {
           ? `🍦 Gast möchte ein Eis · ${EIS_PREIS}€`
           : l.willBoot
           ? `🚤 Gast möchte aufs Wasser · ${BOOT_PREIS}€`
+          : l.willPool
+          ? `🏊 Gast möchte schwimmen · ${POOL_PREIS}€`
           : l.aufSee
           ? '🚤 Gast ist mit dem Boot draußen'
+          : l.imPool
+          ? '🏊 Gast ist im Pool'
           : l.booked
           ? `😎 belegt · ${loungerPrice(ziel)}€/Tag`
           : `frei · ${loungerPrice(ziel)}€/Tag`;
