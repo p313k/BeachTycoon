@@ -167,6 +167,13 @@ const SCHWIMM_MS = 6000; // wie lange ein Gast im Wasser bleibt
 const CLUBHAUS_COST = 2000; // hebt den Tagespreis jeder Liege
 const CLUBHAUS_BONUS = 6;
 
+const STRANDBAR_COST = 2500; // Tresen mit Barkeeper und vier Hockern
+const GETRAENK_PREIS = 18; // was ein Gast an der Bar lässt
+const BAR_HOCKER = 4; // so viele Gäste passen gleichzeitig an den Tresen
+const BAR_TRINK_MS = 5200; // wie lange ein Gast sitzen bleibt, bevor er zahlt
+
+const GAST_SPEED = 5.4; // wie schnell Gäste über den Sand laufen
+
 const UPGRADES = {
   schirm: { name: 'Sonnenschirm', icon: '☂️', cost: 80, bonus: 8 },
   tisch: { name: 'Beistelltisch', icon: '🪑', cost: 50, bonus: 5 },
@@ -186,9 +193,11 @@ const SEASON_LENGTH = SEASON_MONTHS.reduce((sum, m) => sum + m.days, 0); // 92 T
 
 // 92 Tage in 30 Minuten -> ein Spieltag dauert knapp 20 Sekunden
 const DAY_DURATION_MS = SEASON_DURATION_MS / SEASON_LENGTH;
-// Kunden kommen im Verhältnis zum Tag, damit der Strand nicht die halbe Zeit leer steht
-const SPAWN_MIN_MS = DAY_DURATION_MS * 0.05;
-const SPAWN_MAX_MS = DAY_DURATION_MS * 0.35;
+// Kunden kommen im Verhältnis zum Tag, damit der Strand nicht die halbe Zeit leer steht.
+// Der Weg vom Eingang zur Liege kostet zusätzlich ein paar Sekunden – das Fenster ist
+// deshalb enger als die reine Wartezeit früher.
+const SPAWN_MIN_MS = DAY_DURATION_MS * 0.03;
+const SPAWN_MAX_MS = DAY_DURATION_MS * 0.26;
 
 // --- Maße der 3D-Welt (1 Einheit ≈ 1 Meter) ---
 const CELL = 2.6; // Abstand von Liege zu Liege
@@ -248,6 +257,7 @@ function loadState() {
           : 0,
         pool: parsed.pool === true,
         clubhaus: parsed.clubhaus === true,
+        bar: parsed.bar === true,
         boote: typeof parsed.boote === 'number'
           ? Math.min(MAX_BOOTE, Math.max(0, Math.round(parsed.boote)))
           : parsed.bootsverleih === true
@@ -269,6 +279,7 @@ function loadState() {
     boote: 0,
     pool: false,
     clubhaus: false,
+    bar: false,
     view: 'ego', // Ich-Perspektive, umschaltbar auf 'ueber' (Blick über den ganzen Strand)
     loungerUpgrades: defaultUpgrades(START_LOUNGER_COUNT),
   };
@@ -307,6 +318,7 @@ function saveState() {
       boote: state.boote,
       pool: state.pool,
       clubhaus: state.clubhaus,
+      bar: state.bar,
       view: state.view,
       loungerUpgrades: state.loungerUpgrades,
     })
@@ -347,6 +359,14 @@ function makeLounger() {
     imPool: false,
     poolPlatz: 0,
     schwimmBis: 0,
+    willBar: false, // Gast hat Durst
+    barGehabt: false,
+    nextBar: null,
+    barPhase: null, // null, 'hin', 'sitzt' oder 'zurueck'
+    barPlatz: 0,
+    barBis: 0,
+    barLaeufer: null,
+    anreise: null, // Gast, der noch vom Eingang zur Liege unterwegs ist
   };
 }
 
@@ -368,6 +388,7 @@ function buyLounger() {
   state.money -= cost;
   state.loungerUpgrades.push(emptyUpgrade());
   loungers.push(makeLounger());
+  wegeAnRasterAnpassen(); // das Raster rückt zusammen, laufende Gäste ziehen mit
   const w = loungerWorld(loungers.length - 1);
   addPopup(w.x, 1.6, w.z, '🛏️ neu!');
   saveState();
@@ -446,6 +467,7 @@ function startNextDay() {
   dayEarningsBase = state.money;
   dayEnded = false;
   selectedLounger = null;
+  gaesteVerabschieden(); // noch vor dem Zurücksetzen, solange klar ist, wer wo steckt
   loungers.forEach((l) => {
     if (l.booked) {
       l.booked = false;
@@ -453,6 +475,7 @@ function startNextDay() {
       if (l.dirty) l.trash = makeTrash();
     }
     l.waiting = false;
+    l.anreise = null; // wer es bis Feierabend nicht geschafft hat, kommt morgen wieder
     l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
     l.willEis = false;
     l.eisGehabt = false;
@@ -465,6 +488,11 @@ function startNextDay() {
     l.poolGehabt = false;
     l.nextPool = null;
     l.imPool = false;
+    l.willBar = false;
+    l.barGehabt = false;
+    l.nextBar = null;
+    l.barPhase = null;
+    l.barLaeufer = null;
   });
   bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; }); // Ausfahrten enden mit dem Tag
   saveState();
@@ -658,25 +686,38 @@ function updateCamera() {
   // Eiswagen rechts und Bootsverleih links müssen mit ins Bild
   // Der Eiswagen steht nah an der Kamera und braucht mehr Rand als die
   // Bootshütte, die weit hinten am Ufer liegt
-  const zusatzRechts = hatEiswagen() ? 6.5 : 0;
+  // Die Strandbar steht noch weiter rechts als der Eiswagen
+  const zusatzRechts = Math.max(hatEiswagen() ? 6.5 : 0, state.bar ? 12.0 : 0);
   const zusatzLinks = Math.max(hatBootsverleih() ? 2.5 : 0, state.pool ? 3.5 : 0, state.clubhaus ? 8.5 : 0);
-  // Pool und Clubhaus stehen vorn, dafür muss die Kamera weiter zurück
-  const zusatzVorn = state.pool ? 5.5 : 0;
+  // Pool und Bar stehen vorn, dafür muss die Kamera weiter zurück.
+  // Etwas Rand bleibt immer frei, damit man die Gäste am Eingang ankommen sieht.
+  const zusatzVorn = Math.max(2.5, state.pool ? 5.5 : 0, state.bar ? 6.5 : 0);
   const radius = Math.max(g.width / 2 + Math.max(zusatzRechts, zusatzLinks), g.depth / 2);
-  // Fester Neigungswinkel: flach genug, dass Meer und Himmel im Bild bleiben,
-  // steil genug, dass die hinteren Reihen nicht hinter den vorderen verschwinden
-  const neigung = (16 * Math.PI) / 180;
   const target = [(zusatzRechts - zusatzLinks) / 2, 1.1, -g.depth * 0.12 + zusatzVorn * 0.5];
+
+  const aspect = sceneCanvas.width / Math.max(1, sceneCanvas.height);
+  const fovY = (54 * Math.PI) / 180;
+  // Hochkant ist das Blickfeld seitlich viel schmaler als in die Höhe. Ohne diese
+  // Rechnung stünde die Kamera auf dem Handy so nah, dass rechts und links vom
+  // Strand alles abgeschnitten wird.
+  const abstandFuerBreite = (radius + 2) / (Math.tan(fovY / 2) * aspect);
   // Mindestabstand, damit die Figur bei kleinem Strand nicht das halbe Bild füllt
-  const abstand = Math.max(13, g.depth * 0.5 + radius * 0.6 + 7.5 + zusatzVorn * 0.7);
+  const abstandNah = Math.max(13, g.depth * 0.5 + radius * 0.6 + 7.5 + zusatzVorn * 0.7);
+  const abstand = Math.max(abstandNah, abstandFuerBreite);
+
+  // Grundsätzlich flach genug, dass Meer und Himmel im Bild bleiben, und steil
+  // genug, dass die hinteren Reihen nicht hinter den vorderen verschwinden.
+  // Muss die Kamera fürs Hochformat weiter zurück, schaut sie steiler nach unten –
+  // sonst besteht der halbe Bildschirm aus leerem Sand.
+  const steiler = Math.min(1, Math.max(0, abstand / abstandNah - 1));
+  const neigung = ((16 + 14 * steiler) * Math.PI) / 180;
   cameraEye = [target[0], target[1] + abstand * Math.tan(neigung), target[2] + abstand];
 
   // Freier Streifen zwischen Kopfzeile und Bedienleiste
   const bandMitte = (getTopBarRect().h + (hud.height - getShopRect().h)) / 2;
   const versatz = 1 - (2 * bandMitte) / hud.height;
 
-  const aspect = sceneCanvas.width / Math.max(1, sceneCanvas.height);
-  const proj = mat4Perspective((54 * Math.PI) / 180, aspect, 0.5, 600, versatz);
+  const proj = mat4Perspective(fovY, aspect, 0.5, 600, versatz);
   viewProj = mat4Multiply(proj, mat4LookAt(cameraEye, target, [0, 1, 0]));
 }
 
@@ -918,6 +959,16 @@ const COL = {
   clubBand: [0.24, 0.5, 0.62],
   clubDach: [0.6, 0.32, 0.28],
   clubTuer: [0.42, 0.3, 0.22],
+  // Strandbar
+  barTresen: [0.78, 0.6, 0.4],
+  barPlatte: [0.5, 0.36, 0.24],
+  barDach: [0.86, 0.73, 0.44],
+  barDachOben: [0.75, 0.62, 0.35],
+  barFlascheA: [0.32, 0.62, 0.44],
+  barFlascheB: [0.88, 0.55, 0.28],
+  barFlascheC: [0.72, 0.32, 0.42],
+  barkeeperShirt: [0.19, 0.46, 0.56],
+  glas: [0.55, 0.85, 0.9],
 };
 
 // --- Figuren ---
@@ -941,6 +992,22 @@ function drawPerson(x, z, shirt, blickY, gehPhase) {
   box([x, 1.38, z], [0.14, 0.12, 0.14], COL.hautGast, blickY, 0);
   box([x, 1.6, z], [0.32, 0.34, 0.3], COL.hautGast, blickY, 0);
   box([x, 1.75, z], [0.34, 0.1, 0.32], COL.haar, blickY, 0);
+}
+
+// Gast auf einem Barhocker: Beine hängen herunter, ein Arm liegt am Tresen
+function drawSitzenderGast(h) {
+  const wippen = Math.sin(zeitMs * 0.003 + h.x) * 0.02;
+  [-0.15, 0.15].forEach((dx) => {
+    box([h.x + dx, 0.3, h.z - 0.06], [0.16, 0.6, 0.16], COL.hose, 0, 0);
+  });
+  box([h.x, 0.74, h.z - 0.12], [0.46, 0.14, 0.52], COL.hose, 0, 0);
+  box([h.x, 1.12 + wippen, h.z - 0.16], [0.5, 0.62, 0.29], COL.gastShirt, 0, 0);
+  box([h.x, 1.48 + wippen, h.z - 0.16], [0.14, 0.12, 0.14], COL.hautGast, 0, 0);
+  box([h.x, 1.7 + wippen, h.z - 0.16], [0.32, 0.34, 0.3], COL.hautGast, 0, 0);
+  box([h.x, 1.85 + wippen, h.z - 0.16], [0.34, 0.1, 0.32], COL.haar, 0, 0);
+  // Arm nach vorn zum Glas auf der Tresenplatte
+  box([h.x + 0.24, 1.24 + wippen, h.z - 0.5], [0.13, 0.13, 0.66], COL.hautGast, 0, 0);
+  box([h.x + 0.24, 1.32, h.z - 0.84], [0.15, 0.24, 0.15], COL.glas, 0, 0);
 }
 
 // Gast, der auf der Liege liegt
@@ -997,7 +1064,7 @@ function drawLounger(index) {
     l.trash.forEach((t) => {
       box([w.x + t.dx, MATTRESS_Y + 0.1, w.z + t.dz], [t.size, t.size, t.size], COL.muell, t.rot, 0);
     });
-  } else if (l.booked && !l.aufSee && !l.imPool) {
+  } else if (l.booked && !l.aufSee && !l.imPool && !l.barPhase) {
     drawLiegenderGast(w.x, w.z + 0.15, breit);
   } else if (l.waiting) {
     drawPerson(w.x + breite * 0.5 + 0.9, w.z + 0.9, COL.gastShirt, Math.PI, 0);
@@ -1208,6 +1275,90 @@ function drawClubhaus() {
   box([c.x + 1.9, 5.0, c.z - 0.2], [0.75, 0.45, 0.05], COL.markise, 0, 0);
 }
 
+// --- Strandbar: vorn rechts an der Promenade, gegenüber vom Pool ---
+// Der Eismann kommt zum Gast, hier ist es umgekehrt: die Gäste stehen von der
+// Liege auf und gehen selbst zum Tresen.
+const BAR_HALB_X = 2.2;
+
+function barWorld() {
+  const g = getGrid();
+  return { x: g.width / 2 + 4.8, z: g.depth / 2 + 4.4 };
+}
+
+// Die Hocker stehen in einer Reihe vor dem Tresen, zur Kamera hin
+function barHockerWorld(platz) {
+  const b = barWorld();
+  return { x: b.x + (platz - (BAR_HOCKER - 1) / 2) * 1.15, z: b.z + 1.35 };
+}
+
+// Von der Liege über Gasse und Promenade an den Hocker – und genauso zurück
+function barZugangZ() {
+  return barWorld().z + 2.6;
+}
+
+function wegZurBar(index) {
+  const hocker = barHockerWorld(loungers[index].barPlatz);
+  return [
+    { x: wartePlatz(index).x, z: reihenSpurZ(index) },
+    { x: gassenX(), z: reihenSpurZ(index) },
+    { x: gassenX(), z: barZugangZ() },
+    { x: hocker.x, z: barZugangZ() },
+    hocker,
+  ];
+}
+
+function wegVonDerBar(index) {
+  const hocker = barHockerWorld(loungers[index].barPlatz);
+  return [
+    { x: hocker.x, z: barZugangZ() },
+    { x: gassenX(), z: barZugangZ() },
+    { x: gassenX(), z: reihenSpurZ(index) },
+    wartePlatz(index),
+  ];
+}
+
+function drawStrandbar() {
+  const b = barWorld();
+  shadow(b.x, b.z + 0.3, 6.0);
+
+  // Tresen mit überstehender Platte
+  box([b.x, 0.55, b.z], [BAR_HALB_X * 2, 1.1, 0.7], COL.barTresen, 0, 0);
+  box([b.x, 1.15, b.z + 0.12], [BAR_HALB_X * 2 + 0.5, 0.1, 1.05], COL.barPlatte, 0, 0);
+
+  // Rückwand mit Flaschenregal
+  box([b.x, 0.95, b.z - 1.5], [BAR_HALB_X * 2, 1.9, 0.14], COL.huette, 0, 0);
+  box([b.x, 1.32, b.z - 1.36], [BAR_HALB_X * 1.7, 0.08, 0.32], COL.holz, 0, 0);
+  for (let i = 0; i < 6; i++) {
+    const flasche = i % 3 === 0 ? COL.barFlascheA : i % 3 === 1 ? COL.barFlascheB : COL.barFlascheC;
+    box([b.x + (i - 2.5) * 0.58, 1.54, b.z - 1.36], [0.16, 0.36, 0.16], flasche, 0, 0);
+  }
+
+  // Vier Pfosten tragen ein Palmdach aus zwei Lagen. Das Dach reicht bewusst
+  // nur bis kurz vor die Hocker – sonst verdeckt es von oben die ganze Bar.
+  const dachZ = b.z - 0.4;
+  [-1, 1].forEach((sx) => {
+    [-1, 1].forEach((sz) => {
+      box([b.x + sx * (BAR_HALB_X + 0.2), 1.2, dachZ + sz * 1.45], [0.16, 2.4, 0.16], COL.holzDunkel, 0, 0);
+    });
+  });
+  box([b.x, 2.46, dachZ], [BAR_HALB_X * 2 + 1.6, 0.16, 3.3], COL.barDach, 0, 0);
+  box([b.x, 2.63, dachZ], [BAR_HALB_X * 2 + 0.8, 0.16, 2.4], COL.barDachOben, 0, 0);
+
+  // Hocker, auch die leeren
+  for (let i = 0; i < BAR_HOCKER; i++) {
+    const h = barHockerWorld(i);
+    box([h.x, 0.3, h.z], [0.14, 0.6, 0.14], COL.gestell, 0, 0);
+    box([h.x, 0.64, h.z], [0.5, 0.12, 0.5], COL.holz, 0, 0);
+  }
+
+  // Barkeeper hinter dem Tresen, mit Blick zu den Gästen
+  drawPerson(b.x, b.z - 0.85, COL.barkeeperShirt, 0, 0);
+
+  loungers.forEach((l) => {
+    if (l.barPhase === 'sitzt') drawSitzenderGast(barHockerWorld(l.barPlatz));
+  });
+}
+
 // --- Strand und Meer ---
 function drawBeach() {
   const g = getGrid();
@@ -1280,15 +1431,34 @@ function getTopBarRect() {
   return { x: 0, y: 0, w: hud.width, h: 64 };
 }
 
+// Ab hier ist der Bildschirm zu schmal für die volle Aufteilung: die Kacheln
+// rücken auf zwei Spalten zusammen und die Knöpfe oben zeigen nur ihr Symbol
+function schmalerBildschirm() {
+  return hud.width < 640;
+}
+
+// Sieben Kacheln: auf breiten Bildschirmen drei nebeneinander, auf dem Handy
+// nur zwei – drei schmale Spalten wären zu eng für Titel und Preis
+const SHOP_SLOTS = 7;
+
+function getShopCols() {
+  return schmalerBildschirm() ? 2 : 3;
+}
+
+function getShopRows() {
+  return Math.ceil(SHOP_SLOTS / getShopCols());
+}
+
 function getShopRect() {
-  const h = Math.max(150, Math.min(hud.height * 0.26, 210));
+  const h = Math.max(getShopRows() >= 4 ? 200 : 168, Math.min(hud.height * 0.32, 250));
   return { x: 0, y: hud.height - h, w: hud.width, h };
 }
 
-// Steuerkreis unten links: Knopf in eine Richtung ziehen, dahin läuft die Figur
+// Steuerkreis unten links: Knopf in eine Richtung ziehen, dahin läuft die Figur.
+// Auf schmalen Bildschirmen kleiner, sonst bleibt für die Kacheln nichts übrig.
 function getStickRect() {
   const shop = getShopRect();
-  const radius = Math.min(78, (shop.h - 24) / 2);
+  const radius = Math.min(78, (shop.h - 24) / 2, hud.width * 0.17);
   return { cx: shop.x + 16 + radius, cy: shop.y + shop.h / 2, radius };
 }
 
@@ -1299,21 +1469,25 @@ function getShopContentRect() {
   return { x: left, y: shop.y, w: shop.w - left, h: shop.h };
 }
 
+// Auf dem Handy reicht die Breite nicht für beschriftete Knöpfe – dort bleibt
+// nur das Symbol stehen, sonst schiebt sich die Kopfzeile ineinander
 function getResetButtonRect() {
-  return { x: hud.width - 132, y: 18, w: 120, h: 28 };
+  const w = schmalerBildschirm() ? 42 : 120;
+  return { x: hud.width - w - 12, y: 18, w, h: 28 };
 }
 
 function getViewButtonRect() {
   const reset = getResetButtonRect();
-  return { x: reset.x - 134, y: 18, w: 126, h: 28 };
+  const w = schmalerBildschirm() ? 42 : 126;
+  return { x: reset.x - w - 8, y: 18, w, h: 28 };
 }
 
-// Sechs Kacheln als 3x2-Raster: Personal, Liege, Eiswagen, Boote, Pool, Clubhaus
+// Reihenfolge der Kacheln: Personal, Liege, Eiswagen, Boote, Pool, Clubhaus, Strandbar
 function getShopSlotRect(index) {
   const area = getShopContentRect();
-  const pad = 8;
-  const cols = 3;
-  const rows = 2;
+  const cols = getShopCols();
+  const rows = getShopRows();
+  const pad = 7;
   const cw = (area.w - pad * (cols + 1)) / cols;
   const ch = (area.h - pad * (rows + 1)) / rows;
   return {
@@ -1348,19 +1522,23 @@ function getClubhausButtonRect() {
   return getShopSlotRect(5);
 }
 
-// Ausbau-Panel: 3x2 Kacheln (5 Ausbauten + Fertig-Knopf)
+function getStrandbarButtonRect() {
+  return getShopSlotRect(6);
+}
+
+// Ausbau-Panel: fünf Ausbauten plus Fertig-Knopf, gleiche Aufteilung wie die Bedienleiste
 const PANEL_CELLS = [...UPGRADE_KEYS, 'close'];
 
 function getUpgradeButtonRect(which) {
   const area = getShopContentRect();
-  const pad = 8;
-  const cols = 3;
-  const rows = 2;
+  const cols = getShopCols(); // dieselbe Aufteilung wie die Kacheln der Bedienleiste
+  const rows = Math.ceil(PANEL_CELLS.length / cols);
+  const pad = 7;
   const index = Math.max(0, PANEL_CELLS.indexOf(which));
-  const cw = (area.w - pad * cols) / cols;
+  const cw = (area.w - pad * (cols + 1)) / cols;
   const ch = (area.h - pad * (rows + 1)) / rows;
   return {
-    x: area.x + (index % cols) * (cw + pad),
+    x: area.x + pad + (index % cols) * (cw + pad),
     y: area.y + pad + Math.floor(index / cols) * (ch + pad),
     w: cw,
     h: ch,
@@ -1491,6 +1669,21 @@ function schiebeAusLiegen(pos) {
     }
   }
 
+  // Der Tresen der Strandbar versperrt den Weg, unter dem Dach läuft es sich frei
+  if (state.bar) {
+    const b = barWorld();
+    const halbX = BAR_HALB_X + 0.4;
+    const halbZ = 1.1;
+    const dx = pos.x - b.x;
+    const dz = pos.z - b.z;
+    const dX = halbX - Math.abs(dx);
+    const dZ = halbZ - Math.abs(dz);
+    if (dX > 0 && dZ > 0) {
+      if (dX < dZ) pos.x = b.x + Math.sign(dx || 1) * halbX;
+      else pos.z = b.z + Math.sign(dz || 1) * halbZ;
+    }
+  }
+
   // Der Eiswagen ist ebenfalls fest
   if (hatEiswagen()) {
     const w = eiswagenWorld();
@@ -1510,8 +1703,15 @@ function schiebeAusLiegen(pos) {
 
 function beachBounds() {
   const g = getGrid();
-  const vorn = state.pool || state.clubhaus ? 9.0 : 4.5; // Platz vor Pool und Clubhaus
-  return { x: g.width / 2 + 3.5, zMin: -g.depth / 2 - 3.5, zMax: g.depth / 2 + vorn };
+  // Platz vor Pool und Clubhaus, und bis zur Promenade, sobald die Bar steht
+  const vorn = state.bar ? 8.5 : state.pool || state.clubhaus ? 9.0 : 4.5;
+  const rechts = state.bar ? 8.5 : 3.5; // rechts bis an die Bar heran
+  return {
+    xMin: -g.width / 2 - 3.5,
+    xMax: g.width / 2 + rechts,
+    zMin: -g.depth / 2 - 3.5,
+    zMax: g.depth / 2 + vorn,
+  };
 }
 
 function updatePlayer(dt) {
@@ -1563,7 +1763,7 @@ function updatePlayer(dt) {
     }
   }
 
-  player.x = Math.min(Math.max(player.x, -b.x), b.x);
+  player.x = Math.min(Math.max(player.x, b.xMin), b.xMax);
   player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
   schiebeAusLiegen(player);
   player.schritt = bewegt ? player.schritt + dt * 0.012 : 0;
@@ -1598,6 +1798,135 @@ function cleanNearbyLoungers() {
       addPopup(w.x, 1.8, w.z, '🧹 sauber!');
     }
   });
+}
+
+// --- Wege über den Strand ---
+// Gäste erscheinen nicht mehr am Platz: sie kommen am Eingang vorn rechts an und
+// laufen zu ihrer Liege. Damit sie dabei nicht durch die Möbel gehen, folgen sie
+// immer demselben Muster: Promenade vorn, Gasse rechts am Raster, Spur vor der Reihe.
+function strandEingang() {
+  const g = getGrid();
+  return { x: g.width / 2 + 6.0, z: g.depth / 2 + 7.0 };
+}
+
+// Gasse rechts neben dem Raster, schmal genug, dass sie am Eiswagen vorbeiführt
+function gassenX() {
+  return getGrid().width / 2 + 1.4;
+}
+
+// Vor jeder Reihe bleibt eine Spur frei: 1,25 m vor der Liegenmitte liegt sie
+// hinter dem Fußende und noch vor der Rückenlehne der nächsten Reihe
+function reihenSpurZ(index) {
+  return loungerWorld(index).z + 1.25;
+}
+
+// Platz neben der Liege, auf dem der Gast steht, bis er eingecheckt wird
+function wartePlatz(index) {
+  const w = loungerWorld(index);
+  const breite = state.loungerUpgrades[index].doppel ? LOUNGER_W * 1.75 : LOUNGER_W;
+  return { x: w.x + breite * 0.5 + 0.9, z: w.z + 0.9 };
+}
+
+// Promenade vorn, auf der alles zwischen Eingang, Gasse und Bar verläuft
+function promenadeZ() {
+  return strandEingang().z;
+}
+
+function wegZurLiege(index) {
+  const spur = reihenSpurZ(index);
+  const ziel = wartePlatz(index);
+  return [{ x: gassenX(), z: promenadeZ() }, { x: gassenX(), z: spur }, { x: ziel.x, z: spur }, ziel];
+}
+
+function wegZumAusgang(index) {
+  const spur = reihenSpurZ(index);
+  return [
+    { x: wartePlatz(index).x, z: spur },
+    { x: gassenX(), z: spur },
+    { x: gassenX(), z: promenadeZ() },
+    strandEingang(),
+  ];
+}
+
+function makeLaeufer(start, wege) {
+  return { x: start.x, z: start.z, blick: Math.PI, schritt: 0, wege, i: 0 };
+}
+
+// Ein Stück am Weg entlang. Übrige Schrittlänge wandert in den nächsten Abschnitt,
+// sonst würde die Figur an jedem Knick kurz stehen bleiben.
+// Gibt true zurück, sobald der letzte Wegpunkt erreicht ist.
+function laeuferGehen(f, dt, speed) {
+  let rest = speed * (dt / 1000);
+  while (rest > 0 && f.i < f.wege.length) {
+    const ziel = f.wege[f.i];
+    const dx = ziel.x - f.x;
+    const dz = ziel.z - f.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 0.0001) f.blick = Math.atan2(dx, dz);
+    if (dist <= rest) {
+      f.x = ziel.x;
+      f.z = ziel.z;
+      rest -= dist;
+      f.i++;
+    } else {
+      f.x += (dx / dist) * rest;
+      f.z += (dz / dist) * rest;
+      rest = 0;
+    }
+  }
+  f.schritt += dt * 0.012;
+  return f.i >= f.wege.length;
+}
+
+// Jede neue Liege ordnet das Raster um. Ein Weg behält dabei seine Abschnitte
+// und ihre Bedeutung, deshalb genügt es, die Wegpunkte auszutauschen: wer schon
+// in der Gasse ist, bleibt in der Gasse und läuft nur etwas weiter links oder rechts.
+function wegeAnRasterAnpassen() {
+  loungers.forEach((l, i) => {
+    if (l.anreise) l.anreise.wege = wegZurLiege(i);
+    if (l.barLaeufer) l.barLaeufer.wege = l.barPhase === 'hin' ? wegZurBar(i) : wegVonDerBar(i);
+  });
+  abreisende.forEach((a) => {
+    if (a.liege < loungers.length) a.wege = wegZumAusgang(a.liege);
+  });
+}
+
+// --- Anreise: Gast läuft vom Eingang zur Liege und wartet dort auf den Check-in ---
+function updateGastAnreise(dt, now) {
+  loungers.forEach((l, i) => {
+    if (l.booked || l.dirty || l.waiting) return;
+    if (!l.anreise) {
+      if (now >= l.nextSpawn) l.anreise = makeLaeufer(strandEingang(), wegZurLiege(i));
+      return;
+    }
+    if (laeuferGehen(l.anreise, dt, GAST_SPEED)) {
+      l.anreise = null;
+      l.waiting = true;
+    }
+  });
+}
+
+// --- Abreise: nach Feierabend laufen die Gäste sichtbar vom Strand ---
+const abreisende = [];
+
+function gaesteVerabschieden() {
+  loungers.forEach((l, i) => {
+    if (!l.booked) return;
+    // Von dort losgehen, wo der Gast gerade steckt, sonst springt er über den Strand
+    const start =
+      l.barPhase === 'sitzt'
+        ? barHockerWorld(l.barPlatz)
+        : l.barLaeufer
+        ? { x: l.barLaeufer.x, z: l.barLaeufer.z }
+        : wartePlatz(i);
+    abreisende.push({ ...makeLaeufer(start, wegZumAusgang(i)), liege: i });
+  });
+}
+
+function updateAbreise(dt) {
+  for (let i = abreisende.length - 1; i >= 0; i--) {
+    if (laeuferGehen(abreisende[i], dt, GAST_SPEED)) abreisende.splice(i, 1);
+  }
 }
 
 // --- Liegen-Personal: mehrere sichtbare Leute, die von Liege zu Liege laufen ---
@@ -1934,6 +2263,75 @@ function updatePool(now) {
   }
 }
 
+// Gäste bekommen Durst und gehen selbst zum Tresen: hin, sitzen, zahlen, zurück
+function updateBar(dt, now) {
+  if (!state.bar) return;
+
+  for (const l of loungers) {
+    if (!l.booked) {
+      l.nextBar = null;
+      continue;
+    }
+    if (l.willBar || l.barGehabt || l.barPhase || l.aufSee || l.imPool) continue;
+    if (l.nextBar === null) {
+      l.nextBar = now + randomDelay(DAY_DURATION_MS * 0.1, DAY_DURATION_MS * 0.6);
+    } else if (now >= l.nextBar) {
+      l.willBar = true;
+    }
+  }
+
+  // Freie Hocker vergeben, wer keinen bekommt, wartet auf der Liege weiter.
+  // Wer schon auf dem Rückweg ist, gibt seinen Platz sofort frei.
+  const belegt = new Set(
+    loungers.filter((l) => l.barPhase === 'hin' || l.barPhase === 'sitzt').map((l) => l.barPlatz)
+  );
+  loungers.forEach((l, i) => {
+    if (!l.willBar || belegt.size >= BAR_HOCKER) return;
+    let platz = 0;
+    while (belegt.has(platz)) platz++;
+    belegt.add(platz);
+    l.willBar = false;
+    l.barPlatz = platz;
+    l.barPhase = 'hin';
+    l.barLaeufer = makeLaeufer(wartePlatz(i), wegZurBar(i));
+  });
+
+  loungers.forEach((l, i) => {
+    if (l.barPhase === 'hin') {
+      if (laeuferGehen(l.barLaeufer, dt, GAST_SPEED)) {
+        l.barLaeufer = null;
+        l.barPhase = 'sitzt';
+        l.barBis = now + BAR_TRINK_MS;
+      }
+    } else if (l.barPhase === 'sitzt') {
+      if (now >= l.barBis) {
+        const h = barHockerWorld(l.barPlatz);
+        state.money += GETRAENK_PREIS;
+        addPopup(h.x, 2.1, h.z, `🍹 +${GETRAENK_PREIS}€`);
+        l.barPhase = 'zurueck';
+        l.barLaeufer = makeLaeufer(h, wegVonDerBar(i));
+        saveState();
+      }
+    } else if (l.barPhase === 'zurueck') {
+      if (laeuferGehen(l.barLaeufer, dt, GAST_SPEED)) {
+        l.barLaeufer = null;
+        l.barPhase = null;
+        l.barGehabt = true;
+      }
+    }
+  });
+}
+
+function buyStrandbar() {
+  if (state.bar) return;
+  if (state.money < STRANDBAR_COST) return;
+  state.money -= STRANDBAR_COST;
+  state.bar = true;
+  const b = barWorld();
+  addPopup(b.x, 3.2, b.z, '🍹 Strandbar!');
+  saveState();
+}
+
 function buyPool() {
   if (state.pool) return;
   if (state.money < POOL_COST) return;
@@ -1979,6 +2377,7 @@ function resetGame() {
   state.boote = 0;
   state.pool = false;
   state.clubhaus = false;
+  state.bar = false;
   state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
   clearSave(SAVE_KEY); // löscht auch ein altes Cookie, sonst käme der Spielstand zurück
   saveState();
@@ -2068,6 +2467,10 @@ hud.addEventListener('pointerdown', (e) => {
       buyClubhaus();
       return;
     }
+    if (pointInRect(px, py, getStrandbarButtonRect())) {
+      buyStrandbar();
+      return;
+    }
   }
 
   // Steuerkreis greifen
@@ -2129,7 +2532,7 @@ hud.addEventListener('pointerup', (e) => {
   const ground = screenToGround(px, py);
   if (!ground) return;
   const b = beachBounds();
-  player.targetX = Math.min(Math.max(ground.x, -b.x), b.x);
+  player.targetX = Math.min(Math.max(ground.x, b.xMin), b.xMax);
   player.targetZ = Math.min(Math.max(ground.z, b.zMin), b.zMax);
 });
 
@@ -2152,9 +2555,7 @@ function update(now) {
   checkDayEnd();
 
   if (!dayEnded) {
-    for (const l of loungers) {
-      if (!l.booked && !l.dirty && !l.waiting && now >= l.nextSpawn) l.waiting = true;
-    }
+    updateGastAnreise(dt, now);
     updatePlayer(dt);
     checkInNearbyCustomers();
     cleanNearbyLoungers();
@@ -2163,7 +2564,11 @@ function update(now) {
     if (hatEiswagen()) updateEismann(dt);
     updateBootsverleih(dt, now);
     updatePool(now);
+    updateBar(dt, now);
   }
+
+  // Heimweg auch am Season-Ende zu Ende laufen lassen, sonst stehen alle mitten im Sand
+  updateAbreise(dt);
 
   popups = popups.filter((p) => {
     p.rise += dt * 0.0012;
@@ -2202,15 +2607,34 @@ function drawScene() {
   }
   if (state.pool) drawPool();
   if (state.clubhaus) drawClubhaus();
+  if (state.bar) drawStrandbar();
   if (hatBootsverleih()) {
     drawBootsverleih();
     bootFlotte.forEach((b) => { if (b.aktiv) drawBoot(b); });
   }
+  // Gäste auf dem Weg: zur Liege, zur Bar und zurück, und abends nach Hause
+  loungers.forEach((l) => {
+    const f = l.anreise || l.barLaeufer;
+    if (f) drawPerson(f.x, f.z, COL.gastShirt, f.blick, f.schritt);
+  });
+  abreisende.forEach((a) => drawPerson(a.x, a.z, COL.gastShirt, a.blick, a.schritt));
   // In der Ich-Perspektive steckt die Kamera im Kopf – die eigene Figur bliebe im Weg
   if (!istEgoSicht()) drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
   liegeStaffs.forEach((s) => {
     if (s.gesetzt) drawPerson(s.x, s.z, COL.personalShirt, s.blick, s.schritt);
   });
+}
+
+// Setzt die Schrift so, dass der Text in die Kachel passt: erst die Wunschgröße,
+// dann Schritt für Schritt kleiner. Ohne das ragen längere Titel wie
+// "Bootsverleih" auf schmalen Bildschirmen über den Kachelrand hinaus.
+function setzeSchriftPassend(text, maxBreite, wunsch, kleinste, fett) {
+  const stil = fett ? 'bold ' : '';
+  for (let size = Math.round(wunsch); size > kleinste; size--) {
+    ctx.font = `${stil}${size}px sans-serif`;
+    if (ctx.measureText(text).width <= maxBreite) return;
+  }
+  ctx.font = `${stil}${kleinste}px sans-serif`;
 }
 
 // Eine Kachel der Bedienleiste: Titel, aktueller Stand, Hinweis darunter
@@ -2222,14 +2646,15 @@ function drawShopButton(rect, titel, info) {
   ctx.fill();
 
   const mitte = rect.x + rect.w / 2;
+  const platz = rect.w - 10;
   ctx.textAlign = 'center';
   ctx.fillStyle = info.voll || bezahlbar ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
-  ctx.font = `bold ${Math.max(12, Math.min(17, rect.w * 0.095))}px sans-serif`;
+  setzeSchriftPassend(titel, platz, Math.min(17, rect.w * 0.115), 10, true);
   ctx.fillText(titel, mitte, rect.y + rect.h * 0.33);
-  ctx.font = `${Math.max(11, Math.min(15, rect.w * 0.08))}px sans-serif`;
+  setzeSchriftPassend(info.stand, platz, Math.min(15, rect.w * 0.1), 9, false);
   ctx.fillText(info.stand, mitte, rect.y + rect.h * 0.62);
-  ctx.font = `${Math.max(9, Math.min(12, rect.w * 0.062))}px sans-serif`;
   ctx.fillStyle = info.voll || bezahlbar ? 'rgba(255, 255, 255, 0.7)' : 'rgba(255, 255, 255, 0.32)';
+  setzeSchriftPassend(info.hinweis, platz, Math.min(12, rect.w * 0.08), 8, false);
   ctx.fillText(info.hinweis, mitte, rect.y + rect.h * 0.87);
 }
 
@@ -2243,20 +2668,25 @@ function drawHud() {
   ctx.fillRect(top.x, top.y, top.w, top.h);
 
   ctx.fillStyle = '#ffffff';
+  // Datum, Uhr und Geld teilen sich eine Zeile: auf schmalen Bildschirmen
+  // muss die Schrift kleiner werden, sonst laufen die drei ineinander
+  const kopfGross = schmalerBildschirm() ? 13 : 18;
+  const kopfGeld = schmalerBildschirm() ? 16 : 22;
+  const moneyRight = getViewButtonRect().x - 12;
+
   const dateText = `Season ${state.season} · ${getDateLabel(state.day)}`;
-  ctx.font = 'bold 18px sans-serif';
+  setzeSchriftPassend(dateText, moneyRight * 0.44, kopfGross, 10, true);
   ctx.textAlign = 'left';
   ctx.fillText(dateText, 12, top.h / 2 + 6);
   const dateEnd = 12 + ctx.measureText(dateText).width;
 
   const moneyText = `💰 ${state.money}€`;
-  ctx.font = 'bold 22px sans-serif';
-  const moneyRight = getViewButtonRect().x - 14;
+  setzeSchriftPassend(moneyText, moneyRight * 0.36, kopfGeld, 12, true);
   ctx.textAlign = 'right';
   ctx.fillText(moneyText, moneyRight, top.h / 2 + 7);
   const moneyLeft = moneyRight - ctx.measureText(moneyText).width;
 
-  ctx.font = 'bold 18px sans-serif';
+  setzeSchriftPassend(`🕗 ${getClockLabel()}`, moneyLeft - dateEnd - 12, kopfGross, 10, true);
   ctx.textAlign = 'center';
   ctx.fillText(`🕗 ${getClockLabel()}`, (dateEnd + moneyLeft) / 2, top.h / 2 + 6);
 
@@ -2264,10 +2694,19 @@ function drawHud() {
   // Hintere Reihen zuerst, damit vordere Schilder oben liegen.
   const schilder = [];
   loungers.forEach((l, i) => {
-    if (!l.waiting && !l.willEis && !l.willBoot && !l.willPool) return;
+    if (!l.waiting && !l.willEis && !l.willBoot && !l.willPool && !l.willBar) return;
     const w = loungerWorld(i);
     const p = worldToScreen(w.x, 1.15, w.z + 0.9);
-    if (p) schilder.push({ p, text: l.waiting ? `${loungerPrice(i)}€` : l.willEis ? '🍦' : l.willBoot ? '🚤' : '🏊' });
+    const text = l.waiting
+      ? `${loungerPrice(i)}€`
+      : l.willEis
+      ? '🍦'
+      : l.willBoot
+      ? '🚤'
+      : l.willPool
+      ? '🏊'
+      : '🍹';
+    if (p) schilder.push({ p, text });
   });
   schilder.sort((a, b) => a.p.y - b.p.y);
   ctx.font = 'bold 13px sans-serif';
@@ -2343,14 +2782,14 @@ function drawHud() {
       ctx.roundRect(btn.x, btn.y, btn.w, btn.h, 10);
       ctx.fill();
       ctx.fillStyle = owned || affordable ? '#ffffff' : 'rgba(255, 255, 255, 0.45)';
-      ctx.font = `bold ${Math.max(12, btn.w * 0.075)}px sans-serif`;
-      ctx.fillText(`${UPGRADES[kind].icon} ${UPGRADES[kind].name}`, btn.x + btn.w / 2, btn.y + btn.h * 0.44);
-      ctx.font = `${Math.max(10, btn.w * 0.065)}px sans-serif`;
-      ctx.fillText(
-        owned ? `✓ +${UPGRADES[kind].bonus}€/Buchung` : `${UPGRADES[kind].cost}€ · +${UPGRADES[kind].bonus}€/Buchung`,
-        btn.x + btn.w / 2,
-        btn.y + btn.h * 0.75
-      );
+      const titel = `${UPGRADES[kind].icon} ${UPGRADES[kind].name}`;
+      const unten = owned
+        ? `✓ +${UPGRADES[kind].bonus}€/Buchung`
+        : `${UPGRADES[kind].cost}€ · +${UPGRADES[kind].bonus}€/Buchung`;
+      setzeSchriftPassend(titel, btn.w - 10, Math.min(16, btn.w * 0.1), 10, true);
+      ctx.fillText(titel, btn.x + btn.w / 2, btn.y + btn.h * 0.44);
+      setzeSchriftPassend(unten, btn.w - 10, Math.min(13, btn.w * 0.075), 8, false);
+      ctx.fillText(unten, btn.x + btn.w / 2, btn.y + btn.h * 0.75);
     });
 
     const closeBtn = getUpgradeButtonRect('close');
@@ -2359,14 +2798,12 @@ function drawHud() {
     ctx.roundRect(closeBtn.x, closeBtn.y, closeBtn.w, closeBtn.h, 10);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = `bold ${Math.max(12, closeBtn.w * 0.075)}px sans-serif`;
-    ctx.fillText(`Liege ${selectedLounger + 1}`, closeBtn.x + closeBtn.w / 2, closeBtn.y + closeBtn.h * 0.44);
-    ctx.font = `${Math.max(10, closeBtn.w * 0.065)}px sans-serif`;
-    ctx.fillText(
-      `✕ Fertig · ${loungerPrice(selectedLounger)}€/Tag`,
-      closeBtn.x + closeBtn.w / 2,
-      closeBtn.y + closeBtn.h * 0.75
-    );
+    const liegeTitel = `Liege ${selectedLounger + 1}`;
+    const liegeInfo = `✕ Fertig · ${loungerPrice(selectedLounger)}€/Tag`;
+    setzeSchriftPassend(liegeTitel, closeBtn.w - 10, Math.min(16, closeBtn.w * 0.1), 10, true);
+    ctx.fillText(liegeTitel, closeBtn.x + closeBtn.w / 2, closeBtn.y + closeBtn.h * 0.44);
+    setzeSchriftPassend(liegeInfo, closeBtn.w - 10, Math.min(13, closeBtn.w * 0.075), 8, false);
+    ctx.fillText(liegeInfo, closeBtn.x + closeBtn.w / 2, closeBtn.y + closeBtn.h * 0.75);
   } else {
     // Sechs Kacheln: Titel, darunter der Stand, darunter der nächste Preis
     drawShopButton(getPersonalButtonRect(), '👷 Personal', {
@@ -2433,6 +2870,15 @@ function drawHud() {
       stand: state.clubhaus ? `+${CLUBHAUS_BONUS}€ je Liege` : `${CLUBHAUS_COST}€`,
       hinweis: state.clubhaus ? 'gehobener Strand' : `alle Liegen +${CLUBHAUS_BONUS}€/Tag`,
     });
+
+    drawShopButton(getStrandbarButtonRect(), '🍹 Strandbar', {
+      voll: state.bar,
+      preis: STRANDBAR_COST,
+      stand: state.bar
+        ? `${loungers.filter((l) => l.barPhase === 'sitzt').length}/${BAR_HOCKER} am Tresen`
+        : `${STRANDBAR_COST}€`,
+      hinweis: state.bar ? `${GETRAENK_PREIS}€ pro Getränk` : `Gäste zahlen ${GETRAENK_PREIS}€ je Glas`,
+    });
   }
 
   // Ich-Perspektive: Fadenkreuz und was gerade davor liegt
@@ -2460,10 +2906,16 @@ function drawHud() {
           ? `🚤 Gast möchte aufs Wasser · ${BOOT_PREIS}€`
           : l.willPool
           ? `🏊 Gast möchte schwimmen · ${POOL_PREIS}€`
+          : l.willBar
+          ? `🍹 Gast hat Durst · ${GETRAENK_PREIS}€`
           : l.aufSee
           ? '🚤 Gast ist mit dem Boot draußen'
           : l.imPool
           ? '🏊 Gast ist im Pool'
+          : l.barPhase
+          ? '🍹 Gast ist an der Bar'
+          : l.anreise
+          ? '🚶 Gast ist auf dem Weg hierher'
           : l.booked
           ? `😎 belegt · ${loungerPrice(ziel)}€/Tag`
           : `frei · ${loungerPrice(ziel)}€/Tag`;
@@ -2512,8 +2964,9 @@ function drawHud() {
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 14px sans-serif';
   ctx.textAlign = 'center';
+  const sichtSymbol = istEgoSicht() ? '🛰' : '👁';
   ctx.fillText(
-    istEgoSicht() ? '🛰 Übersicht' : '👁 Ich-Sicht',
+    schmalerBildschirm() ? sichtSymbol : `${sichtSymbol} ${istEgoSicht() ? 'Übersicht' : 'Ich-Sicht'}`,
     viewBtn.x + viewBtn.w / 2,
     viewBtn.y + viewBtn.h / 2 + 5
   );
@@ -2524,7 +2977,11 @@ function drawHud() {
   ctx.roundRect(resetBtn.x, resetBtn.y, resetBtn.w, resetBtn.h, 8);
   ctx.fill();
   ctx.fillStyle = '#ffffff';
-  ctx.fillText('🔄 Neu starten', resetBtn.x + resetBtn.w / 2, resetBtn.y + resetBtn.h / 2 + 5);
+  ctx.fillText(
+    schmalerBildschirm() ? '🔄' : '🔄 Neu starten',
+    resetBtn.x + resetBtn.w / 2,
+    resetBtn.y + resetBtn.h / 2 + 5
+  );
 
   // Season-Abrechnung
   if (dayEnded) {
