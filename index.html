@@ -2069,6 +2069,24 @@ function figurenAuseinanderschieben() {
   for (const f of bewegt) {
     for (const s of stehend) schiebeAuseinander(f, s, 1);
   }
+
+  // Die Spielfigur selbst weicht bisher niemandem aus: beim Zulaufen auf einen
+  // wartenden Gast (zum Einchecken) oder eine gehende Figur gab es nichts, was
+  // die beiden physisch getrennt hätte – man lief einfach durch sie hindurch.
+  // Die Spielfigur wird deshalb von allen weggeschoben, ohne dass die anderen
+  // dafür ihre Position verlieren. Der Check-in-Radius (CELL*0.85 ≈ 2,2m) ist
+  // deutlich größer als dieser Mindestabstand (0,85m), das Einchecken klappt
+  // also längst, bevor die Spielfigur überhaupt an den Gast heranstößt.
+  for (const s of stehend) {
+    if (s !== player) schiebeAuseinander(player, s, 1);
+  }
+  for (const f of bewegt) schiebeAuseinander(player, f, 1);
+  // Der Schub kann die Spielfigur aus dem erlaubten Bereich oder in ein festes
+  // Möbelstück drücken – dieselbe Randkorrektur wie nach der eigenen Bewegung.
+  const b = beachBounds();
+  player.x = Math.min(Math.max(player.x, b.xMin), b.xMax);
+  player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
+  schiebeAusLiegen(player);
 }
 
 // --- Liegen-Personal: mehrere sichtbare Leute, die von Liege zu Liege laufen ---
