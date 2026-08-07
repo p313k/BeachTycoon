@@ -1322,27 +1322,33 @@ function barHockerWorld(platz) {
   return { x: b.x + (platz - (BAR_HOCKER - 1) / 2) * 1.15, z: b.z + 1.35 };
 }
 
-// Von der Liege über Gasse und Promenade an den Hocker – und genauso zurück
-function barZugangZ() {
-  return barWorld().z + 2.6;
+// Von der Liege über Gasse und Promenade an den Hocker – und genauso zurück.
+// Jeder Hocker bekommt eine leicht andere Zufahrtshöhe, sonst laufen mehrere
+// Gäste, die zufällig gleichzeitig zur Bar wollen, exakt auf denselben Punkt zu.
+function barZugangZ(platz) {
+  return barWorld().z + 2.6 + platz * 0.3;
 }
 
 function wegZurBar(index) {
-  const hocker = barHockerWorld(loungers[index].barPlatz);
+  const platz = loungers[index].barPlatz;
+  const hocker = barHockerWorld(platz);
+  const zugang = barZugangZ(platz);
   return [
     { x: wartePlatz(index).x, z: reihenSpurZ(index) },
     { x: gassenX(), z: reihenSpurZ(index) },
-    { x: gassenX(), z: barZugangZ() },
-    { x: hocker.x, z: barZugangZ() },
+    { x: gassenX(), z: zugang },
+    { x: hocker.x, z: zugang },
     hocker,
   ];
 }
 
 function wegVonDerBar(index) {
-  const hocker = barHockerWorld(loungers[index].barPlatz);
+  const platz = loungers[index].barPlatz;
+  const hocker = barHockerWorld(platz);
+  const zugang = barZugangZ(platz);
   return [
-    { x: hocker.x, z: barZugangZ() },
-    { x: gassenX(), z: barZugangZ() },
+    { x: hocker.x, z: zugang },
+    { x: gassenX(), z: zugang },
     { x: gassenX(), z: reihenSpurZ(index) },
     wartePlatz(index),
   ];
@@ -1872,18 +1878,28 @@ function eingangsPlatz(index) {
   return { x: e.x + ((index % 6) - 2.5) * 0.9, z: e.z + (Math.floor(index / 6) % 4) * 0.9 };
 }
 
+// Beim Einbiegen in die Gasse bekommt jede Liege eine eigene, garantiert
+// einzigartige Höhe – nicht nur den groben Eingangsplatz, den sich mehrere
+// Liegen teilen. Sonst laufen alle Gäste, die zufällig einen Eingangsplatz
+// in derselben Zeile haben, weiterhin auf einen gemeinsamen Punkt zu.
+function gassenEinstiegZ(index) {
+  return promenadeZ() + index * 0.35;
+}
+
 function wegZurLiege(index) {
+  const einstieg = gassenEinstiegZ(index);
   const spur = reihenSpurZ(index);
   const ziel = wartePlatz(index);
-  return [{ x: gassenX(), z: promenadeZ() }, { x: gassenX(), z: spur }, { x: ziel.x, z: spur }, ziel];
+  return [{ x: gassenX(), z: einstieg }, { x: gassenX(), z: spur }, { x: ziel.x, z: spur }, ziel];
 }
 
 function wegZumAusgang(index) {
+  const einstieg = gassenEinstiegZ(index);
   const spur = reihenSpurZ(index);
   return [
     { x: wartePlatz(index).x, z: spur },
     { x: gassenX(), z: spur },
-    { x: gassenX(), z: promenadeZ() },
+    { x: gassenX(), z: einstieg },
     eingangsPlatz(index),
   ];
 }
