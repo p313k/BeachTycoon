@@ -442,11 +442,41 @@ function dayProgress() {
   return Math.min(1, Math.max(0, (Date.now() - state.dayStartTime) / DAY_DURATION_MS));
 }
 
+// Was am Abend noch läuft, ist trotzdem verkauft: wer im Wasser ist, am Tresen
+// sitzt oder mit dem Boot draußen ist, hat die Leistung bekommen und zahlt sie
+// auch. Nur offene Wünsche, die niemand mehr erfüllt hat, verfallen.
+// Die Gäste bleiben dabei, wo sie sind – sie räumen erst beim Tageswechsel.
+function offeneUmsaetzeAbrechnen() {
+  loungers.forEach((l) => {
+    if (l.imPool && !l.poolGehabt) {
+      const p = poolWorld();
+      state.money += POOL_PREIS;
+      addPopup(p.x, 1.6, p.z, `🏊 +${POOL_PREIS}€`);
+      l.poolGehabt = true;
+    }
+    if (l.barPhase === 'sitzt' && !l.barGehabt) {
+      const h = barHockerWorld(l.barPlatz);
+      state.money += GETRAENK_PREIS;
+      addPopup(h.x, 2.1, h.z, `🍹 +${GETRAENK_PREIS}€`);
+      l.barGehabt = true;
+    }
+  });
+  bootFlotte.forEach((b) => {
+    if (!b.aktiv || b.bezahlt) return;
+    const v = bootsverleihWorld();
+    state.money += BOOT_PREIS;
+    addPopup(v.x + 1.6, 1.6, v.z - 3, `🚤 +${BOOT_PREIS}€`);
+    b.bezahlt = true;
+  });
+  saveState();
+}
+
 // Bei knapp 20 Sekunden pro Tag wäre ein Knopf nach jedem Tag 92-mal pro Season fällig:
 // der Tag läuft deshalb von selbst weiter und zeigt die Abrechnung nur kurz ein.
 // Nur das Season-Ende hält das Spiel an.
 function checkDayEnd() {
   if (dayEnded || dayProgress() < 1) return;
+  offeneUmsaetzeAbrechnen(); // erst kassieren, dann abrechnen – sonst fehlt das Geld im Tagesergebnis
   if (isLastDayOfSeason()) {
     dayEnded = true;
     return;
@@ -494,7 +524,8 @@ function startNextDay() {
     l.barPhase = null;
     l.barLaeufer = null;
   });
-  bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; }); // Ausfahrten enden mit dem Tag
+  // Ausfahrten enden mit dem Tag – bezahlt wurden sie vorher in offeneUmsaetzeAbrechnen
+  bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; b.bezahlt = false; });
   saveState();
 }
 
@@ -1156,7 +1187,7 @@ const bootFlotte = [];
 
 function ensureBoote() {
   while (bootFlotte.length < state.boote) {
-    bootFlotte.push({ bahn: bootFlotte.length, aktiv: false, t: 0, gast: null });
+    bootFlotte.push({ bahn: bootFlotte.length, aktiv: false, t: 0, gast: null, bezahlt: false });
   }
   bootFlotte.length = state.boote;
 }
@@ -1832,6 +1863,15 @@ function promenadeZ() {
   return strandEingang().z;
 }
 
+// Jede Liege bekommt am Eingang ihren eigenen Platz. Sonst kommen alle Gäste
+// auf demselben Punkt an und stünden am Feierabend exakt übereinander –
+// gerade dort, wo sie kurz vor dem Ziel nicht mehr ausweichen.
+// 6 x 4 Plätze reichen für alle 24 Liegen.
+function eingangsPlatz(index) {
+  const e = strandEingang();
+  return { x: e.x + ((index % 6) - 2.5) * 0.9, z: e.z + (Math.floor(index / 6) % 4) * 0.9 };
+}
+
 function wegZurLiege(index) {
   const spur = reihenSpurZ(index);
   const ziel = wartePlatz(index);
@@ -1844,7 +1884,7 @@ function wegZumAusgang(index) {
     { x: wartePlatz(index).x, z: spur },
     { x: gassenX(), z: spur },
     { x: gassenX(), z: promenadeZ() },
-    strandEingang(),
+    eingangsPlatz(index),
   ];
 }
 
@@ -1896,7 +1936,7 @@ function updateGastAnreise(dt, now) {
   loungers.forEach((l, i) => {
     if (l.booked || l.dirty || l.waiting) return;
     if (!l.anreise) {
-      if (now >= l.nextSpawn) l.anreise = makeLaeufer(strandEingang(), wegZurLiege(i));
+      if (now >= l.nextSpawn) l.anreise = makeLaeufer(eingangsPlatz(i), wegZurLiege(i));
       return;
     }
     if (laeuferGehen(l.anreise, dt, GAST_SPEED)) {
@@ -1914,7 +1954,9 @@ function gaesteVerabschieden() {
     if (!l.booked) return;
     // Von dort losgehen, wo der Gast gerade steckt, sonst springt er über den Strand
     const start =
-      l.barPhase === 'sitzt'
+      l.imPool
+        ? poolPlatzWorld(l.poolPlatz)
+        : l.barPhase === 'sitzt'
         ? barHockerWorld(l.barPlatz)
         : l.barLaeufer
         ? { x: l.barLaeufer.x, z: l.barLaeufer.z }
@@ -1926,6 +1968,90 @@ function gaesteVerabschieden() {
 function updateAbreise(dt) {
   for (let i = abreisende.length - 1; i >= 0; i--) {
     if (laeuferGehen(abreisende[i], dt, GAST_SPEED)) abreisende.splice(i, 1);
+  }
+}
+
+// --- Figuren gehen sich aus dem Weg ---
+// Sonst laufen Gäste, Personal und Eismänner mitten durcheinander hindurch.
+// Nach allen Bewegungen werden zu enge Paare auseinandergeschoben. Wer dabei
+// von seinem Weg abkommt, steuert im nächsten Bild von selbst zurück.
+const FIGUR_ABSTAND = 0.85; // etwa Schulterbreite zweier Figuren
+
+// Läufer auf ihrem letzten Abschnitt bleiben verschont: würde man sie kurz vor
+// dem Ziel wegschieben, kämen sie dort nie an und blieben ewig unterwegs.
+function aufLetztemAbschnitt(f) {
+  return f.i >= f.wege.length - 1;
+}
+
+function bewegteFiguren() {
+  const liste = [];
+  liegeStaffs.forEach((s) => {
+    if (s.gesetzt) liste.push(s);
+  });
+  eismaenner.forEach((e) => {
+    if (e.gesetzt) liste.push(e);
+  });
+  loungers.forEach((l) => {
+    const f = l.anreise || l.barLaeufer;
+    if (f && !aufLetztemAbschnitt(f)) liste.push(f);
+  });
+  abreisende.forEach((a) => {
+    if (!aufLetztemAbschnitt(a)) liste.push(a);
+  });
+  return liste;
+}
+
+// Figuren, die nur schieben und selbst nicht ausweichen. Dazu gehören:
+// die Spielfigur, damit der Steuerkreis nicht gegen die Gäste ankämpft;
+// alle, die ohnehin stehen; und Läufer auf dem letzten Abschnitt – die dürfen
+// nicht weggeschoben werden, sollen sich aber trotzdem Platz verschaffen.
+function stehendeFiguren() {
+  const liste = [player];
+  loungers.forEach((l, i) => {
+    if (l.waiting) liste.push(wartePlatz(i));
+    if (l.barPhase === 'sitzt') liste.push(barHockerWorld(l.barPlatz));
+    const f = l.anreise || l.barLaeufer;
+    if (f && aufLetztemAbschnitt(f)) liste.push(f);
+  });
+  abreisende.forEach((a) => {
+    if (aufLetztemAbschnitt(a)) liste.push(a);
+  });
+  if (state.bar) {
+    const b = barWorld();
+    liste.push({ x: b.x, z: b.z - 0.85 }); // Barkeeper
+  }
+  return liste;
+}
+
+// Schiebt a von b weg. anteilA sagt, welchen Teil des Wegs a übernimmt –
+// bei 1 bleibt b stehen, bei 0.5 weichen beide gleich weit aus.
+function schiebeAuseinander(a, b, anteilA) {
+  let dx = a.x - b.x;
+  let dz = a.z - b.z;
+  let dist = Math.hypot(dx, dz);
+  if (dist >= FIGUR_ABSTAND) return;
+  if (dist < 0.0001) {
+    dx = 1; // exakt übereinander: irgendeine Richtung, Hauptsache sie trennen sich
+    dz = 0;
+    dist = 1;
+  }
+  const schub = FIGUR_ABSTAND - dist;
+  a.x += (dx / dist) * schub * anteilA;
+  a.z += (dz / dist) * schub * anteilA;
+  if (anteilA < 1) {
+    b.x -= (dx / dist) * schub * (1 - anteilA);
+    b.z -= (dz / dist) * schub * (1 - anteilA);
+  }
+}
+
+function figurenAuseinanderschieben() {
+  const bewegt = bewegteFiguren();
+  for (let i = 0; i < bewegt.length; i++) {
+    for (let j = i + 1; j < bewegt.length; j++) schiebeAuseinander(bewegt[i], bewegt[j], 0.5);
+  }
+  const stehend = stehendeFiguren();
+  for (const f of bewegt) {
+    for (const s of stehend) schiebeAuseinander(f, s, 1);
   }
 }
 
@@ -2172,6 +2298,7 @@ function updateBootsverleih(dt, now) {
     b.aktiv = true;
     b.t = 0;
     b.gast = i;
+    b.bezahlt = false;
   }
 
   // Laufende Ausfahrten
@@ -2180,11 +2307,15 @@ function updateBootsverleih(dt, now) {
     b.t += dt / BOOT_FAHRT_MS;
     if (b.t >= 1) {
       const v = bootsverleihWorld();
-      state.money += BOOT_PREIS;
+      if (!b.bezahlt) {
+        // am Abend abgerechnete Fahrten sind schon bezahlt und zahlen nicht doppelt
+        state.money += BOOT_PREIS;
+        addPopup(v.x + 1.6, 1.6, v.z - 3, `🚤 +${BOOT_PREIS}€`);
+      }
       if (b.gast !== null && loungers[b.gast]) loungers[b.gast].aufSee = false;
-      addPopup(v.x + 1.6, 1.6, v.z - 3, `🚤 +${BOOT_PREIS}€`);
       b.aktiv = false;
       b.gast = null;
+      b.bezahlt = false;
       b.t = 0;
       saveState();
     }
@@ -2255,10 +2386,13 @@ function updatePool(now) {
   for (const l of loungers) {
     if (!l.imPool || now < l.schwimmBis) continue;
     const p = poolWorld();
-    state.money += POOL_PREIS;
+    if (!l.poolGehabt) {
+      // am Abend abgerechnete Bäder sind schon bezahlt
+      state.money += POOL_PREIS;
+      addPopup(p.x, 1.6, p.z, `🏊 +${POOL_PREIS}€`);
+      l.poolGehabt = true;
+    }
     l.imPool = false;
-    l.poolGehabt = true;
-    addPopup(p.x, 1.6, p.z, `🏊 +${POOL_PREIS}€`);
     saveState();
   }
 }
@@ -2306,8 +2440,11 @@ function updateBar(dt, now) {
     } else if (l.barPhase === 'sitzt') {
       if (now >= l.barBis) {
         const h = barHockerWorld(l.barPlatz);
-        state.money += GETRAENK_PREIS;
-        addPopup(h.x, 2.1, h.z, `🍹 +${GETRAENK_PREIS}€`);
+        if (!l.barGehabt) {
+          // am Abend abgerechnete Getränke sind schon bezahlt
+          state.money += GETRAENK_PREIS;
+          addPopup(h.x, 2.1, h.z, `🍹 +${GETRAENK_PREIS}€`);
+        }
         l.barPhase = 'zurueck';
         l.barLaeufer = makeLaeufer(h, wegVonDerBar(i));
         saveState();
@@ -2569,6 +2706,7 @@ function update(now) {
 
   // Heimweg auch am Season-Ende zu Ende laufen lassen, sonst stehen alle mitten im Sand
   updateAbreise(dt);
+  figurenAuseinanderschieben();
 
   popups = popups.filter((p) => {
     p.rise += dt * 0.0012;
