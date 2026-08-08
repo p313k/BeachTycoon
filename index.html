@@ -174,6 +174,34 @@ const BAR_TRINK_MS = 5200; // wie lange ein Gast sitzen bleibt, bevor er zahlt
 
 const GAST_SPEED = 5.4; // wie schnell Gäste über den Sand laufen
 
+// --- Zwischenfälle: was einem am Strand so dazwischenkommt ---
+const EREIGNIS_AB_TAG = 3; // die ersten Tage bleiben in Ruhe
+const MELDUNG_MS = 5600; // so lange steht die Karte oben im Bild
+
+const MAFIA_MIN_GELD = 700; // vorher lohnt sich der Besuch für sie nicht
+const MAFIA_ANTEIL = 0.12; // so viel vom Vermögen wollen sie
+const MAFIA_MIN = 150;
+const MAFIA_MAX = 900;
+const MAFIA_SCHUTZ_TAGE = 12; // so lange ist nach dem Zahlen Ruhe
+const MAFIA_RACHE_LIEGEN = 3; // so viele Liegen werden bei einer Absage verwüstet
+
+const HAI_DAUER_MS = 9000; // so lange zieht die Flosse ihre Bahn
+const HAI_ARZTKOSTEN = 260; // wenn es doch jemanden erwischt hat
+
+const MOEWEN_ANZAHL = 6;
+const MOEWEN_DAUER_MS = 7000;
+const MOEWEN_SCHADEN_PRO_MOEWE = 8;
+
+const AMT_STRAFE = 45; // Bußgeld pro eingemüllter Liege
+const AMT_KONTROLLE_MS = 3500;
+
+const GEWITTER_DAUER_MS = 9000;
+const GEWITTER_HIMMEL = [0.3, 0.32, 0.37];
+const GEWITTER_LICHT = [0.55, 0.58, 0.63];
+
+const INFLUENCER_DAUER_MS = 8000;
+const INFLUENCER_ANDRANG = 0.4; // so viel kürzer warten neue Gäste danach
+
 const UPGRADES = {
   schirm: { name: 'Sonnenschirm', icon: '☂️', cost: 80, bonus: 8 },
   tisch: { name: 'Beistelltisch', icon: '🪑', cost: 50, bonus: 5 },
@@ -258,6 +286,7 @@ function loadState() {
         pool: parsed.pool === true,
         clubhaus: parsed.clubhaus === true,
         bar: parsed.bar === true,
+        schutzBis: parsed.schutzBis || 0, // bis zu diesem Tag lässt die Mafia den Strand in Ruhe
         boote: typeof parsed.boote === 'number'
           ? Math.min(MAX_BOOTE, Math.max(0, Math.round(parsed.boote)))
           : parsed.bootsverleih === true
@@ -280,6 +309,7 @@ function loadState() {
     pool: false,
     clubhaus: false,
     bar: false,
+    schutzBis: 0,
     view: 'ego', // Ich-Perspektive, umschaltbar auf 'ueber' (Blick über den ganzen Strand)
     loungerUpgrades: defaultUpgrades(START_LOUNGER_COUNT),
   };
@@ -304,6 +334,15 @@ let dayBanner = null; // kurze Einblendung beim automatischen Tageswechsel
 let dayEarningsBase = state.money; // Geldstand zu Beginn des Tages, um "heute verdient" zu zeigen
 let selectedLounger = null; // Index der Liege, deren Ausbau-Panel offen ist
 
+// Zwischenfälle (der ganze Ablauf steht weiter unten in einem eigenen Abschnitt).
+// Die Zustände stehen schon hier oben, weil die Liegen beim Anlegen des Spiels
+// bereits nach der nächsten Gast-Wartezeit fragen – und die hängt am Andrang.
+let ereignis = null; // was gerade passiert, höchstens eins gleichzeitig
+let meldung = null; // Karte oben im Bild
+let naechsterZwischenfall = 0;
+let bootSperreHeute = false; // nach einem Hai bleiben die Boote heute am Steg
+let mehrGaesteBis = 0; // bis dahin füllt sich der Strand schneller
+
 function saveState() {
   writeSave(
     SAVE_KEY,
@@ -319,6 +358,7 @@ function saveState() {
       pool: state.pool,
       clubhaus: state.clubhaus,
       bar: state.bar,
+      schutzBis: state.schutzBis,
       view: state.view,
       loungerUpgrades: state.loungerUpgrades,
     })
@@ -338,13 +378,20 @@ function loungerPrice(i) {
   return price;
 }
 
+// Wartezeit bis zum nächsten Gast. Nach dem Besuch einer Influencerin spricht
+// sich der Strand herum und die Liegen füllen sich deutlich schneller.
+function spawnPause() {
+  const pause = randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
+  return performance.now() < mehrGaesteBis ? pause * INFLUENCER_ANDRANG : pause;
+}
+
 // --- Liegen: der Strand fängt klein an und wird dazugekauft ---
 function makeLounger() {
   return {
     waiting: false,
     booked: false,
     dirty: false,
-    nextSpawn: performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS),
+    nextSpawn: performance.now() + spawnPause(),
     trash: [],
     willEis: false, // Gast hätte gern ein Eis
     eisGehabt: false, // pro Tag kauft jeder Gast höchstens eins
@@ -490,9 +537,11 @@ function startNextDay() {
     state.season += 1;
     state.day = 1;
     state.seasonStartMoney = state.money;
+    state.schutzBis = 0; // in der neuen Season stellt sich die Mafia neu vor
   } else {
     state.day += 1;
   }
+  bootSperreHeute = false; // ein Hai von gestern hält keinen Kapitän mehr auf
   state.dayStartTime = Date.now();
   dayEarningsBase = state.money;
   dayEnded = false;
@@ -506,7 +555,7 @@ function startNextDay() {
     }
     l.waiting = false;
     l.anreise = null; // wer es bis Feierabend nicht geschafft hat, kommt morgen wieder
-    l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
+    l.nextSpawn = performance.now() + spawnPause();
     l.willEis = false;
     l.eisGehabt = false;
     l.nextEis = null;
@@ -525,7 +574,7 @@ function startNextDay() {
     l.barLaeufer = null;
   });
   // Ausfahrten enden mit dem Tag – bezahlt wurden sie vorher in offeneUmsaetzeAbrechnen
-  bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; b.bezahlt = false; });
+  bootFlotte.forEach((b) => { b.aktiv = false; b.gast = null; b.bezahlt = false; b.heim = false; });
   saveState();
 }
 
@@ -562,11 +611,13 @@ function tagesMischung(morgenFarbe, tagFarbe, abendFarbe) {
 }
 
 function getSkyColor() {
-  return tagesMischung([1.0, 0.72, 0.5], [0.49, 0.78, 0.89], [1.0, 0.55, 0.45]);
+  const himmel = tagesMischung([1.0, 0.72, 0.5], [0.49, 0.78, 0.89], [1.0, 0.55, 0.45]);
+  return mixColor(himmel, GEWITTER_HIMMEL, gewitterStaerke() * 0.88);
 }
 
 function getLightColor() {
-  return tagesMischung([1.0, 0.82, 0.64], [1.0, 0.99, 0.95], [1.0, 0.78, 0.62]);
+  const licht = tagesMischung([1.0, 0.82, 0.64], [1.0, 0.99, 0.95], [1.0, 0.78, 0.62]);
+  return mixColor(licht, GEWITTER_LICHT, gewitterStaerke() * 0.85);
 }
 
 // Die Sonne zieht von Osten nach Westen, der Schattenwurf dreht sich mit
@@ -1000,10 +1051,26 @@ const COL = {
   barFlascheC: [0.72, 0.32, 0.42],
   barkeeperShirt: [0.19, 0.46, 0.56],
   glas: [0.55, 0.85, 0.9],
+  // Zwischenfälle
+  mafiaAnzug: [0.13, 0.13, 0.17],
+  mafiaHut: [0.07, 0.07, 0.09],
+  amtShirt: [0.45, 0.48, 0.55],
+  amtHut: [0.2, 0.24, 0.3],
+  amtMappe: [0.85, 0.2, 0.18],
+  influencerShirt: [0.93, 0.35, 0.6],
+  handy: [0.1, 0.1, 0.12],
+  hai: [0.24, 0.28, 0.34],
+  haiFlosse: [0.3, 0.35, 0.42],
+  moewe: [0.97, 0.97, 1.0],
+  moeweFluegel: [0.78, 0.82, 0.88],
+  moeweSchnabel: [0.95, 0.7, 0.2],
+  regen: [0.74, 0.82, 0.9],
 };
 
 // --- Figuren ---
-function drawPerson(x, z, shirt, blickY, gehPhase) {
+// hut ist optional: statt der Haare bekommt die Figur dann einen Hut mit Krempe,
+// damit man Mafia und Ordnungsamt schon von weitem von den Gästen unterscheidet
+function drawPerson(x, z, shirt, blickY, gehPhase, hut) {
   const schwung = Math.sin(gehPhase) * 0.3;
   // quer zur Blickrichtung stehen die Beine nebeneinander, längs schwingen sie beim Gehen
   const qx = Math.cos(blickY);
@@ -1022,7 +1089,11 @@ function drawPerson(x, z, shirt, blickY, gehPhase) {
   // Hals, Kopf und Haar
   box([x, 1.38, z], [0.14, 0.12, 0.14], COL.hautGast, blickY, 0);
   box([x, 1.6, z], [0.32, 0.34, 0.3], COL.hautGast, blickY, 0);
-  box([x, 1.75, z], [0.34, 0.1, 0.32], COL.haar, blickY, 0);
+  box([x, 1.75, z], [0.34, 0.1, 0.32], hut || COL.haar, blickY, 0);
+  if (hut) {
+    box([x, 1.79, z], [0.58, 0.05, 0.56], hut, blickY, 0); // Krempe
+    box([x, 1.89, z], [0.3, 0.17, 0.28], hut, blickY, 0); // Kopfteil
+  }
 }
 
 // Gast auf einem Barhocker: Beine hängen herunter, ein Arm liegt am Tresen
@@ -1187,7 +1258,7 @@ const bootFlotte = [];
 
 function ensureBoote() {
   while (bootFlotte.length < state.boote) {
-    bootFlotte.push({ bahn: bootFlotte.length, aktiv: false, t: 0, gast: null, bezahlt: false });
+    bootFlotte.push({ bahn: bootFlotte.length, aktiv: false, t: 0, gast: null, bezahlt: false, heim: false });
   }
   bootFlotte.length = state.boote;
 }
@@ -1397,9 +1468,13 @@ function drawStrandbar() {
 }
 
 // --- Strand und Meer ---
+// Wo der Sand ins Wasser übergeht – auch der Hai orientiert sich daran
+function uferKante() {
+  return -getGrid().depth / 2 - 5;
+}
+
 function drawBeach() {
-  const g = getGrid();
-  const kante = -g.depth / 2 - 5; // wo der Sand ins Wasser übergeht
+  const kante = uferKante();
 
   // Meer bis zum Horizont, breit genug, dass an den Rändern kein Loch bleibt
   box([0, -0.35, kante - 220], [900, 0.5, 440], COL.meer, 0, 0);
@@ -1411,15 +1486,32 @@ function drawBeach() {
   box([0, -0.15, kante - 0.4 + brandung], [900, 0.38, 1.1], COL.schaum, 0, 0);
   box([0, -0.16, kante - 3.2 - brandung * 0.7], [900, 0.36, 0.5], COL.schaum, 0, 0);
 
-  // Sonne am Himmel, wandert mit dem Tag; überstrahlt bewusst die Beleuchtung
-  const sonne = getSunDirection();
-  box(
-    [cameraEye[0] + sonne[0] * 260, sonne[1] * 260, cameraEye[2] + sonne[2] * 260],
-    [26, 26, 26],
-    COL.sonne,
-    0,
-    0
-  );
+  // Sonne am Himmel, wandert mit dem Tag; überstrahlt bewusst die Beleuchtung.
+  // Im Gewitter steckt sie hinter den Wolken.
+  const nass = gewitterStaerke();
+  if (nass < 0.6) {
+    const sonne = getSunDirection();
+    box(
+      [cameraEye[0] + sonne[0] * 260, sonne[1] * 260, cameraEye[2] + sonne[2] * 260],
+      [26, 26, 26],
+      COL.sonne,
+      0,
+      0
+    );
+  }
+
+  // Regen: ein Gitter aus Strichen, das immer um die Kamera herum steht.
+  // Fällt es an einer festen Weltposition, sieht man es aus der Ich-Perspektive
+  // je nach Standort gar nicht.
+  if (nass > 0) {
+    const tropfen = Math.round(90 * nass);
+    for (let i = 0; i < tropfen; i++) {
+      const px = cameraEye[0] + ((i * 7.31) % 34) - 17;
+      const pz = cameraEye[2] + ((i * 11.77) % 34) - 17;
+      const py = 10 - ((zeitMs * 0.022 + i * 3.7) % 10);
+      box([px, py, pz], [0.05, 0.95, 0.05], COL.regen, 0, 0);
+    }
+  }
 }
 
 // --- Spielfigur ---
@@ -1584,6 +1676,29 @@ function getUpgradeButtonRect(which) {
 
 function getNextDayButtonRect() {
   return { x: hud.width / 2 - 170, y: hud.height / 2 + 30, w: 340, h: 50 };
+}
+
+// Meldung eines Zwischenfalls: schmale Karte direkt unter der Kopfzeile
+function getMeldungRect() {
+  const w = Math.min(hud.width - 20, 460);
+  return { x: (hud.width - w) / 2, y: getTopBarRect().h + 10, w, h: 78 };
+}
+
+// Entscheidungskarte: mittig zwischen Kopfzeile und Bedienleiste
+function getFrageRect() {
+  const w = Math.min(hud.width - 24, 460);
+  const h = 216;
+  const oben = getTopBarRect().h + 16;
+  const platz = hud.height - getShopRect().h - oben;
+  return { x: (hud.width - w) / 2, y: oben + Math.max(0, (platz - h) / 2), w, h };
+}
+
+// nr 0 = zustimmen, nr 1 = ablehnen
+function getFrageButtonRect(nr) {
+  const k = getFrageRect();
+  const pad = 12;
+  const bw = (k.w - pad * 3) / 2;
+  return { x: k.x + pad + nr * (bw + pad), y: k.y + k.h - 58, w: bw, h: 46 };
 }
 
 // --- Steuerkreis (Touch): der Knopf folgt dem Finger, die Figur läuft dorthin ---
@@ -1831,7 +1946,7 @@ function cleanNearbyLoungers() {
     if (Math.hypot(player.x - w.x, player.z - w.z) <= CELL * 0.85) {
       l.dirty = false;
       l.trash = [];
-      l.nextSpawn = performance.now() + randomDelay(SPAWN_MIN_MS, SPAWN_MAX_MS);
+      l.nextSpawn = performance.now() + spawnPause();
       addPopup(w.x, 1.8, w.z, '🧹 sauber!');
     }
   });
@@ -1952,7 +2067,9 @@ function updateGastAnreise(dt, now) {
   loungers.forEach((l, i) => {
     if (l.booked || l.dirty || l.waiting) return;
     if (!l.anreise) {
-      if (now >= l.nextSpawn) l.anreise = makeLaeufer(eingangsPlatz(i), wegZurLiege(i));
+      // Solange es schüttet, macht sich niemand auf den Weg an den Strand.
+      // Wer schon unterwegs ist, läuft weiter – umdrehen wäre auch nass.
+      if (!gewitterAktiv() && now >= l.nextSpawn) l.anreise = makeLaeufer(eingangsPlatz(i), wegZurLiege(i));
       return;
     }
     if (laeuferGehen(l.anreise, dt, GAST_SPEED)) {
@@ -2036,6 +2153,9 @@ function stehendeFiguren() {
     const b = barWorld();
     liste.push({ x: b.x, z: b.z - 0.85 }); // Barkeeper
   }
+  // Wer wegen eines Zwischenfalls da ist, lässt sich nicht wegschieben:
+  // die Mafia stellt sich nicht beiseite, weil ein Gast vorbei will
+  if (ereignis && ereignis.figuren) ereignis.figuren.forEach((f) => liste.push(f));
   return liste;
 }
 
@@ -2308,7 +2428,8 @@ function updateBootsverleih(dt, now) {
   ensureBoote(); // auch nach dem Laden eines Spielstands
 
   for (const l of loungers) {
-    if (!l.booked) {
+    // Nach einem Hai-Alarm will heute niemand mehr aufs Wasser
+    if (!l.booked || bootSperreHeute) {
       l.nextBoot = null;
       continue;
     }
@@ -2321,25 +2442,28 @@ function updateBootsverleih(dt, now) {
   }
 
   // Wartende Gäste auf freie Boote verteilen
-  for (const b of bootFlotte) {
-    if (b.aktiv) continue;
-    const i = loungers.findIndex((l) => l.willBoot);
-    if (i === -1) break;
-    const l = loungers[i];
-    l.willBoot = false;
-    l.bootGehabt = true;
-    l.aufSee = true;
-    b.aktiv = true;
-    b.t = 0;
-    b.gast = i;
-    b.bezahlt = false;
+  if (!bootSperreHeute) {
+    for (const b of bootFlotte) {
+      if (b.aktiv) continue;
+      const i = loungers.findIndex((l) => l.willBoot);
+      if (i === -1) break;
+      const l = loungers[i];
+      l.willBoot = false;
+      l.bootGehabt = true;
+      l.aufSee = true;
+      b.aktiv = true;
+      b.t = 0;
+      b.gast = i;
+      b.bezahlt = false;
+    }
   }
 
-  // Laufende Ausfahrten
+  // Laufende Ausfahrten. Ein Boot mit Hai im Nacken dreht um und fährt
+  // dieselbe Bahn mit Vollgas zurück – deshalb läuft t rückwärts.
   for (const b of bootFlotte) {
     if (!b.aktiv) continue;
-    b.t += dt / BOOT_FAHRT_MS;
-    if (b.t >= 1) {
+    b.t += b.heim ? -(dt / BOOT_FAHRT_MS) * 2.6 : dt / BOOT_FAHRT_MS;
+    if (b.t >= 1 || (b.heim && b.t <= 0)) {
       const v = bootsverleihWorld();
       if (!b.bezahlt) {
         // am Abend abgerechnete Fahrten sind schon bezahlt und zahlen nicht doppelt
@@ -2350,6 +2474,7 @@ function updateBootsverleih(dt, now) {
       b.aktiv = false;
       b.gast = null;
       b.bezahlt = false;
+      b.heim = false;
       b.t = 0;
       saveState();
     }
@@ -2402,10 +2527,10 @@ function updatePool(now) {
     }
   }
 
-  // Einlass, solange Platz im Becken ist
+  // Einlass, solange Platz im Becken ist – bei Gewitter bleibt der Pool zu
   const belegtePlaetze = new Set(loungers.filter((l) => l.imPool).map((l) => l.poolPlatz));
   for (const l of loungers) {
-    if (!l.willPool) continue;
+    if (!l.willPool || gewitterAktiv()) continue;
     if (belegtePlaetze.size >= POOL_KAPAZITAET) break;
     let platz = 0;
     while (belegtePlaetze.has(platz)) platz++;
@@ -2493,6 +2618,477 @@ function updateBar(dt, now) {
   });
 }
 
+// --- Zwischenfälle ---
+// Ab und zu passiert am Strand etwas, das niemand bestellt hat: die Mafia will
+// Schutzgeld, ein Hai treibt die Boote aus dem Wasser, Möwen plündern den
+// Eiswagen. Es läuft immer höchstens ein Zwischenfall gleichzeitig, sonst
+// überlagern sich Meldungen und Figuren.
+//
+// Ein laufender Zwischenfall ist ein Objekt mit update() und optional
+// zeichnen(). Wer fertig ist, setzt ereignis wieder auf null.
+
+function ereignisPausiert() {
+  return ereignis !== null && ereignis.phase === 'frage';
+}
+
+function gewitterAktiv() {
+  return ereignis !== null && ereignis.id === 'gewitter';
+}
+
+// 0 bis 1: fährt am Anfang hoch und am Ende wieder herunter, damit der Himmel
+// nicht schlagartig umspringt
+function gewitterStaerke() {
+  if (!gewitterAktiv()) return 0;
+  const rest = ereignis.bis - zeitMs;
+  const vergangen = GEWITTER_DAUER_MS - rest;
+  return Math.max(0, Math.min(1, Math.min(vergangen, rest) / 1500));
+}
+
+function zeigeMeldung(icon, titel, text, ton) {
+  meldung = { icon, titel, text, ton: ton || 'schlecht', life: 1 };
+}
+
+// --- Besucher: Figuren, die zu einem Zwischenfall auf den Strand kommen ---
+// Sie nehmen denselben Weg wie die Gäste (Promenade, dann die Gasse rechts am
+// Raster) und bleiben in der Gasse vor den Liegen stehen – dort ist Platz und
+// man sieht sie aus beiden Perspektiven.
+function besuchsPlatz(nr) {
+  return { x: gassenX() - nr * 1.2, z: getGrid().depth / 2 + 2.4 };
+}
+
+function macheBesucher(anzahl) {
+  return Array.from({ length: anzahl }, (_, nr) => {
+    const e = strandEingang();
+    return makeLaeufer({ x: e.x + nr * 0.9, z: e.z + 2.5 }, [
+      { x: gassenX(), z: promenadeZ() },
+      besuchsPlatz(nr),
+    ]);
+  });
+}
+
+function besucherGehenLassen(figuren) {
+  const e = strandEingang();
+  figuren.forEach((f, nr) => {
+    f.wege = [{ x: gassenX(), z: promenadeZ() }, { x: e.x + nr * 0.9, z: e.z + 2.5 }];
+    f.i = 0;
+  });
+}
+
+// true, sobald alle am Ziel sind. Wer schon steht, hört auch mit dem
+// Beineschwingen auf – laeuferGehen würde die Schrittphase weiterdrehen.
+function besucherLaufen(figuren, dt) {
+  let alleDa = true;
+  figuren.forEach((f) => {
+    if (f.i >= f.wege.length) {
+      f.schritt = 0;
+      return;
+    }
+    if (!laeuferGehen(f, dt, GAST_SPEED * 0.85)) alleDa = false;
+  });
+  return alleDa;
+}
+
+function besucherSchauenZumSpieler(figuren) {
+  figuren.forEach((f) => {
+    f.blick = Math.atan2(player.x - f.x, player.z - f.z);
+    f.schritt = 0;
+  });
+}
+
+// --- Schutzgeld: der einzige Zwischenfall mit einer echten Entscheidung ---
+function schutzgeldForderung() {
+  const anteil = Math.round((state.money * MAFIA_ANTEIL) / 10) * 10;
+  return Math.min(MAFIA_MAX, Math.max(MAFIA_MIN, anteil));
+}
+
+function starteMafia() {
+  ereignis = {
+    id: 'mafia',
+    phase: 'anmarsch',
+    figuren: macheBesucher(2),
+    forderung: schutzgeldForderung(),
+    frage: null,
+    update(dt) {
+      if (this.phase === 'anmarsch') {
+        if (besucherLaufen(this.figuren, dt)) {
+          this.phase = 'frage'; // ab hier steht der Strandtag still
+          this.frage = {
+            icon: '🕴️',
+            titel: 'Besuch von der Strandmafia',
+            text: `„Schöner Strand habt ihr da. Wäre doch schade, wenn was passiert." ${this.forderung}€ – dann sind ${MAFIA_SCHUTZ_TAGE} Tage Ruhe.`,
+            ja: `💸 ${this.forderung}€ zahlen`,
+            nein: '✊ Ablehnen',
+            jaKosten: this.forderung,
+          };
+        }
+      } else if (this.phase === 'frage') {
+        besucherSchauenZumSpieler(this.figuren);
+      } else if (besucherLaufen(this.figuren, dt)) {
+        ereignis = null;
+      }
+    },
+    zeichnen() {
+      this.figuren.forEach((f) => drawPerson(f.x, f.z, COL.mafiaAnzug, f.blick, f.schritt, COL.mafiaHut));
+    },
+    antwort(ja) {
+      if (ja) mafiaZahlen(this.forderung);
+      else mafiaAblehnen();
+      this.phase = 'abmarsch';
+      this.frage = null;
+      besucherGehenLassen(this.figuren);
+    },
+  };
+}
+
+function mafiaZahlen(forderung) {
+  state.money -= forderung;
+  state.schutzBis = state.day + MAFIA_SCHUTZ_TAGE;
+  const p = besuchsPlatz(0);
+  addPopup(p.x, 2.4, p.z, `💸 -${forderung}€`);
+  zeigeMeldung(
+    '🤝',
+    'Schutzgeld gezahlt',
+    `${forderung}€ sind weg. Dafür lässt euch die Familie ${MAFIA_SCHUTZ_TAGE} Tage in Frieden.`,
+    'neutral'
+  );
+  saveState();
+}
+
+// Sie gehen nicht mit leeren Händen: ein paar Liegen werden verwüstet, wer
+// gerade darauf lag, sucht das Weite. Boote draußen auf See bleiben verschont,
+// sonst käme ihr Gast nie wieder an Land.
+function mafiaAblehnen() {
+  const kandidaten = loungers.map((l, i) => i).filter((i) => !loungers[i].aufSee);
+  for (let i = kandidaten.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [kandidaten[i], kandidaten[j]] = [kandidaten[j], kandidaten[i]];
+  }
+  const ziele = kandidaten.slice(0, MAFIA_RACHE_LIEGEN);
+  let vertrieben = 0;
+  ziele.forEach((i) => {
+    const l = loungers[i];
+    if (l.booked) vertrieben++;
+    l.booked = false;
+    l.waiting = false;
+    l.anreise = null;
+    l.imPool = false;
+    l.barPhase = null;
+    l.barLaeufer = null;
+    l.willEis = false;
+    l.willBoot = false;
+    l.willPool = false;
+    l.willBar = false;
+    l.dirty = true;
+    l.trash = makeTrash();
+    l.nextSpawn = performance.now() + spawnPause();
+    const w = loungerWorld(i);
+    addPopup(w.x, 1.8, w.z, '💥');
+  });
+  const gefloh = vertrieben === 1 ? '1 Gast ist geflohen' : `${vertrieben} Gäste sind geflohen`;
+  zeigeMeldung(
+    '🥊',
+    'Das kam nicht gut an',
+    `${ziele.length} Liegen sind verwüstet${vertrieben > 0 ? `, ${gefloh}` : ''}. Aufräumen musst du selbst.`,
+    'schlecht'
+  );
+  saveState();
+}
+
+// --- Hai: die Boote drehen um, der Verleih macht für heute zu ---
+function starteHai() {
+  const richtung = Math.random() < 0.5 ? 1 : -1;
+  const draussen = bootFlotte.filter((b) => b.aktiv);
+  draussen.forEach((b) => (b.heim = true));
+
+  const gebissen = draussen.length > 0;
+  if (gebissen) {
+    state.money -= HAI_ARZTKOSTEN;
+    const v = bootsverleihWorld();
+    addPopup(v.x + 1.6, 2.4, v.z - 3, `🩹 -${HAI_ARZTKOSTEN}€`);
+  }
+  bootSperreHeute = true;
+  loungers.forEach((l) => {
+    if (l.willBoot) {
+      l.willBoot = false;
+      l.bootGehabt = true; // der Wunsch ist für heute gegessen
+    }
+  });
+
+  zeigeMeldung(
+    '🦈',
+    'Hai vor dem Strand!',
+    gebissen
+      ? `Alle Boote kommen zurück – einen Gast hat es erwischt: ${HAI_ARZTKOSTEN}€ Arztkosten. Heute fährt keiner mehr raus.`
+      : 'Alle Boote bleiben am Steg. Der Verleih macht für heute zu.',
+    'schlecht'
+  );
+
+  ereignis = {
+    id: 'hai',
+    phase: 'laeuft',
+    t: 0,
+    richtung,
+    update(dt) {
+      this.t += dt / HAI_DAUER_MS;
+      if (this.t >= 1) ereignis = null;
+    },
+    zeichnen() {
+      zeichneHai(this);
+    },
+  };
+  saveState();
+}
+
+// Die Bahn läuft dicht am Ufer entlang – weiter draußen ist die Flosse vom
+// Strand aus nur noch ein Punkt und der ganze Schreck verpufft
+function haiPosition(t, richtung) {
+  return {
+    x: (-1 + t * 2) * 30 * richtung,
+    z: uferKante() - 5.5 - Math.sin(t * Math.PI * 3) * 2.0,
+  };
+}
+
+function zeichneHai(h) {
+  const p = haiPosition(h.t, h.richtung);
+  const q = haiPosition(Math.min(1, h.t + 0.01), h.richtung);
+  const blick = Math.atan2(q.x - p.x, q.z - p.z);
+  const laengsX = Math.sin(blick);
+  const laengsZ = Math.cos(blick);
+
+  // Die Wasseroberfläche liegt bei -0.1: der Rücken schaut gerade eben heraus
+  box([p.x, -0.26, p.z], [1.5, 0.5, 5.2], COL.hai, blick, 0);
+  // Schwanzflosse, hochkant hinter dem Körper
+  box([p.x - laengsX * 3.0, -0.05, p.z - laengsZ * 3.0], [0.24, 1.1, 1.3], COL.hai, blick, 0);
+  // Rückenflosse: das Einzige, was man wirklich sieht
+  drawMesh(CONE, [p.x, -0.1, p.z], [1.5, 1.9, 0.42], COL.haiFlosse, blick, 0);
+  // Schaum, den sie vor sich herschiebt
+  box([p.x + laengsX * 1.8, -0.04, p.z + laengsZ * 1.8], [1.8, 0.14, 2.2], COL.schaum, blick, 0);
+}
+
+// --- Möwen: plündern die Auslage des Eiswagens ---
+function starteMoewen(now) {
+  const schaden = MOEWEN_ANZAHL * MOEWEN_SCHADEN_PRO_MOEWE;
+  state.money -= schaden;
+  const w = eiswagenWorld();
+  addPopup(w.x, 4.2, w.z, `🐦 -${schaden}€`);
+  zeigeMeldung('🐦', 'Möwen über dem Eiswagen', `Ein ganzer Schwarm plündert die Auslage: ${schaden}€ Eis sind weg.`, 'schlecht');
+
+  ereignis = {
+    id: 'moewen',
+    phase: 'laeuft',
+    bis: now + MOEWEN_DAUER_MS,
+    update(dt, jetzt) {
+      if (jetzt >= this.bis) ereignis = null;
+    },
+    zeichnen: zeichneMoewen,
+  };
+  saveState();
+}
+
+function zeichneMoewen() {
+  const w = eiswagenWorld();
+  for (let i = 0; i < MOEWEN_ANZAHL; i++) {
+    const winkel = zeitMs * 0.0022 + (i * Math.PI * 2) / MOEWEN_ANZAHL;
+    const r = 2.4 + (i % 3) * 0.7;
+    const x = w.x + Math.cos(winkel) * r;
+    const z = w.z + Math.sin(winkel) * r;
+    const y = 3.6 + Math.sin(zeitMs * 0.003 + i) * 0.4;
+    const schlag = Math.sin(zeitMs * 0.013 + i * 1.7) * 0.22;
+    // Flugrichtung ist die Tangente an den Kreis
+    const blick = -winkel;
+    box([x, y, z], [0.24, 0.2, 0.62], COL.moewe, blick, 0);
+    box([x, y + 0.09, z - 0.34], [0.16, 0.14, 0.18], COL.moewe, blick, 0);
+    box([x, y + 0.07, z - 0.5], [0.07, 0.06, 0.18], COL.moeweSchnabel, blick, 0);
+    // Flügel links und rechts. Um die Flugachse gekippt gibt es kein rotZ,
+    // deshalb steht der Flügel quer (rotY + 90°) – dann klappt rotX ihn auf und ab.
+    [-1, 1].forEach((s) => {
+      box(
+        [x + Math.cos(blick) * s * 0.4, y + 0.05 + Math.abs(schlag) * 0.35, z - Math.sin(blick) * s * 0.4],
+        [0.34, 0.05, 0.66],
+        COL.moeweFluegel,
+        blick + Math.PI / 2,
+        schlag * s
+      );
+    });
+  }
+}
+
+// --- Ordnungsamt: Bußgeld für jede eingemüllte Liege ---
+function starteOrdnungsamt() {
+  ereignis = {
+    id: 'amt',
+    phase: 'anmarsch',
+    figuren: macheBesucher(1),
+    bis: 0,
+    update(dt, jetzt) {
+      if (this.phase === 'anmarsch') {
+        if (besucherLaufen(this.figuren, dt)) {
+          this.phase = 'kontrolle';
+          this.bis = jetzt + AMT_KONTROLLE_MS;
+          ordnungsamtKassiert();
+        }
+      } else if (this.phase === 'kontrolle') {
+        besucherSchauenZumSpieler(this.figuren);
+        if (jetzt >= this.bis) {
+          this.phase = 'abmarsch';
+          besucherGehenLassen(this.figuren);
+        }
+      } else if (besucherLaufen(this.figuren, dt)) {
+        ereignis = null;
+      }
+    },
+    zeichnen() {
+      this.figuren.forEach((f) => {
+        drawPerson(f.x, f.z, COL.amtShirt, f.blick, f.schritt, COL.amtHut);
+        // Klemmbrett in der Hand, damit er nicht wie ein Gast aussieht
+        box([f.x + Math.sin(f.blick) * 0.4, 1.1, f.z + Math.cos(f.blick) * 0.4], [0.34, 0.44, 0.05], COL.amtMappe, f.blick, -0.5);
+      });
+    },
+  };
+}
+
+// Wer bis zur Ankunft aufgeräumt hat, kommt ohne Beanstandung davon
+function ordnungsamtKassiert() {
+  const dreckig = loungers.filter((l) => l.dirty).length;
+  const p = besuchsPlatz(0);
+  if (dreckig === 0) {
+    addPopup(p.x, 2.4, p.z, '📋 ✓');
+    zeigeMeldung('📋', 'Kontrolle vom Ordnungsamt', 'Kein Müll zu finden – keine Beanstandung.', 'gut');
+    return;
+  }
+  const strafe = dreckig * AMT_STRAFE;
+  state.money -= strafe;
+  addPopup(p.x, 2.4, p.z, `📋 -${strafe}€`);
+  zeigeMeldung(
+    '📋',
+    'Kontrolle vom Ordnungsamt',
+    `${dreckig} eingemüllte ${dreckig === 1 ? 'Liege' : 'Liegen'}, ${AMT_STRAFE}€ pro Stück: ${strafe}€ Bußgeld.`,
+    'schlecht'
+  );
+  saveState();
+}
+
+// --- Influencerin: filmt den Strand, danach kommen mehr Gäste ---
+function starteInfluencerin() {
+  ereignis = {
+    id: 'influencer',
+    phase: 'anmarsch',
+    figuren: macheBesucher(1),
+    bis: 0,
+    update(dt, jetzt) {
+      if (this.phase === 'anmarsch') {
+        if (besucherLaufen(this.figuren, dt)) {
+          this.phase = 'fotos';
+          this.bis = jetzt + INFLUENCER_DAUER_MS;
+          mehrGaesteBis = jetzt + DAY_DURATION_MS * 2;
+          // Wer noch auf seinen Gast wartet, bekommt ihn jetzt deutlich früher
+          loungers.forEach((l) => {
+            if (!l.booked && !l.waiting && !l.dirty && !l.anreise) {
+              l.nextSpawn = Math.min(l.nextSpawn, jetzt + spawnPause());
+            }
+          });
+          zeigeMeldung(
+            '📸',
+            'Eine Influencerin filmt euren Strand',
+            'Das Video geht durch die Decke – die nächsten zwei Tage kommen die Gäste viel schneller.',
+            'gut'
+          );
+        }
+      } else if (this.phase === 'fotos') {
+        // schwenkt langsam über den Strand
+        this.figuren.forEach((f) => {
+          f.blick = Math.PI + Math.sin(jetzt * 0.0011) * 0.9;
+          f.schritt = 0;
+        });
+        if (jetzt >= this.bis) {
+          this.phase = 'abmarsch';
+          besucherGehenLassen(this.figuren);
+        }
+      } else if (besucherLaufen(this.figuren, dt)) {
+        ereignis = null;
+      }
+    },
+    zeichnen() {
+      this.figuren.forEach((f) => {
+        drawPerson(f.x, f.z, COL.influencerShirt, f.blick, f.schritt);
+        box([f.x + Math.sin(f.blick) * 0.45, 1.52, f.z + Math.cos(f.blick) * 0.45], [0.18, 0.32, 0.05], COL.handy, f.blick, 0);
+      });
+    },
+  };
+}
+
+// --- Gewitter: der Strand läuft leer, bis der Schauer durch ist ---
+function starteGewitter(now) {
+  zeigeMeldung('⛈️', 'Gewitter zieht auf', 'Solange es schüttet, kommt niemand an den Strand und der Pool bleibt leer.', 'schlecht');
+  ereignis = {
+    id: 'gewitter',
+    phase: 'laeuft',
+    bis: now + GEWITTER_DAUER_MS,
+    update(dt, jetzt) {
+      if (jetzt >= this.bis) {
+        ereignis = null;
+        zeigeMeldung('🌤️', 'Der Schauer ist durch', 'Die Sonne kommt zurück, der Strand füllt sich wieder.', 'gut');
+      }
+    },
+  };
+}
+
+// --- Fundsache: einmal Glück ---
+function starteFundsache() {
+  const fund = 40 + Math.round(Math.random() * 16) * 10;
+  state.money += fund;
+  const g = getGrid();
+  addPopup((Math.random() - 0.5) * g.width, 1.4, g.depth / 2 + 1.4 + Math.random() * 2, `💶 +${fund}€`);
+  zeigeMeldung('💶', 'Fundsache im Sand', `Eine Geldbörse, kein Ausweis drin – ${fund}€ wandern in die Kasse.`, 'gut');
+  saveState();
+}
+
+// --- Auswahl und Ablauf ---
+// Jeder Zwischenfall sagt selbst, wann er überhaupt passen kann. Das Gewicht
+// entscheidet, wie oft er unter den möglichen drankommt.
+const ZWISCHENFAELLE = [
+  { gewicht: 3, moeglich: () => state.money >= MAFIA_MIN_GELD && state.day > state.schutzBis, starten: starteMafia },
+  { gewicht: 3, moeglich: () => hatBootsverleih() && !bootSperreHeute, starten: starteHai },
+  { gewicht: 2, moeglich: () => hatEiswagen(), starten: starteMoewen },
+  { gewicht: 2, moeglich: () => loungers.filter((l) => l.dirty).length >= 2, starten: starteOrdnungsamt },
+  { gewicht: 3, moeglich: () => true, starten: starteInfluencerin },
+  { gewicht: 2, moeglich: () => dayProgress() < 0.7, starten: starteGewitter },
+  { gewicht: 2, moeglich: () => true, starten: starteFundsache },
+];
+
+// Im Schnitt kommt so etwa alle zwei Spieltage etwas dazwischen
+function zwischenfallPlanen(now) {
+  naechsterZwischenfall = now + randomDelay(DAY_DURATION_MS * 0.8, DAY_DURATION_MS * 3.5);
+}
+
+function zwischenfallStarten(now) {
+  const moeglich = ZWISCHENFAELLE.filter((z) => z.moeglich());
+  if (moeglich.length === 0) return;
+  let wurf = Math.random() * moeglich.reduce((summe, z) => summe + z.gewicht, 0);
+  for (const z of moeglich) {
+    wurf -= z.gewicht;
+    if (wurf <= 0) {
+      z.starten(now);
+      return;
+    }
+  }
+  moeglich[moeglich.length - 1].starten(now);
+}
+
+function updateZwischenfaelle(dt, now) {
+  if (ereignis) {
+    ereignis.update(dt, now);
+    return;
+  }
+  if (dayEnded || state.day < EREIGNIS_AB_TAG) return;
+  if (naechsterZwischenfall === 0 || now < naechsterZwischenfall) {
+    if (naechsterZwischenfall === 0) zwischenfallPlanen(now);
+    return;
+  }
+  zwischenfallPlanen(now);
+  zwischenfallStarten(now);
+}
+
 function buyStrandbar() {
   if (state.bar) return;
   if (state.money < STRANDBAR_COST) return;
@@ -2549,6 +3145,7 @@ function resetGame() {
   state.pool = false;
   state.clubhaus = false;
   state.bar = false;
+  state.schutzBis = 0;
   state.loungerUpgrades = defaultUpgrades(START_LOUNGER_COUNT);
   clearSave(SAVE_KEY); // löscht auch ein altes Cookie, sonst käme der Spielstand zurück
   saveState();
@@ -2584,6 +3181,16 @@ hud.addEventListener('pointerdown', (e) => {
   const rect = hud.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
+
+  // Eine offene Entscheidung geht allem anderen vor
+  if (ereignis && ereignis.frage) {
+    if (pointInRect(px, py, getFrageButtonRect(0))) {
+      if (state.money >= (ereignis.frage.jaKosten || 0)) ereignis.antwort(true);
+    } else if (pointInRect(px, py, getFrageButtonRect(1))) {
+      ereignis.antwort(false);
+    }
+    return;
+  }
 
   // Season-Abrechnung: Button für die nächste Season
   if (dayEnded) {
@@ -2723,9 +3330,14 @@ function update(now) {
   lastFrame = now;
   zeitMs = now;
 
+  // Eine offene Entscheidung hält den Strandtag an: die Uhr wandert mit, damit
+  // niemand in aller Ruhe weiterverdient, während die Karte offen ist.
+  if (ereignisPausiert()) state.dayStartTime += dt;
+
   checkDayEnd();
 
-  if (!dayEnded) {
+  const laeuft = !dayEnded && !ereignisPausiert();
+  if (laeuft) {
     updateGastAnreise(dt, now);
     updatePlayer(dt);
     checkInNearbyCustomers();
@@ -2738,9 +3350,15 @@ function update(now) {
     updateBar(dt, now);
   }
 
-  // Heimweg auch am Season-Ende zu Ende laufen lassen, sonst stehen alle mitten im Sand
-  updateAbreise(dt);
-  figurenAuseinanderschieben();
+  // Der Zwischenfall selbst läuft auch während seiner eigenen Frage weiter –
+  // die Besucher stehen dann ohnehin nur da und schauen
+  updateZwischenfaelle(dt, now);
+
+  if (!ereignisPausiert()) {
+    // Heimweg auch am Season-Ende zu Ende laufen lassen, sonst stehen alle mitten im Sand
+    updateAbreise(dt);
+    figurenAuseinanderschieben();
+  }
 
   popups = popups.filter((p) => {
     p.rise += dt * 0.0012;
@@ -2751,6 +3369,11 @@ function update(now) {
   if (dayBanner) {
     dayBanner.life -= dt / 2500; // gut zwei Sekunden sichtbar
     if (dayBanner.life <= 0) dayBanner = null;
+  }
+
+  if (meldung) {
+    meldung.life -= dt / MELDUNG_MS;
+    if (meldung.life <= 0) meldung = null;
   }
 }
 
@@ -2790,6 +3413,7 @@ function drawScene() {
     if (f) drawPerson(f.x, f.z, COL.gastShirt, f.blick, f.schritt);
   });
   abreisende.forEach((a) => drawPerson(a.x, a.z, COL.gastShirt, a.blick, a.schritt));
+  if (ereignis && ereignis.zeichnen) ereignis.zeichnen();
   // In der Ich-Perspektive steckt die Kamera im Kopf – die eigene Figur bliebe im Weg
   if (!istEgoSicht()) drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
   liegeStaffs.forEach((s) => {
@@ -2807,6 +3431,34 @@ function setzeSchriftPassend(text, maxBreite, wunsch, kleinste, fett) {
     if (ctx.measureText(text).width <= maxBreite) return;
   }
   ctx.font = `${stil}${kleinste}px sans-serif`;
+}
+
+// Bricht einen Satz auf mehrere Zeilen um. Die Schrift muss vorher gesetzt sein.
+function zeilenUmbrechen(text, maxBreite, maxZeilen) {
+  const zeilen = [];
+  let zeile = '';
+  text.split(' ').forEach((wort) => {
+    const versuch = zeile ? `${zeile} ${wort}` : wort;
+    if (!zeile || ctx.measureText(versuch).width <= maxBreite) {
+      zeile = versuch;
+    } else {
+      zeilen.push(zeile);
+      zeile = wort;
+    }
+  });
+  if (zeile) zeilen.push(zeile);
+  if (zeilen.length > maxZeilen) {
+    zeilen.length = maxZeilen;
+    zeilen[maxZeilen - 1] = `${zeilen[maxZeilen - 1].slice(0, -1)}…`;
+  }
+  return zeilen;
+}
+
+// Farbe einer Karte: gute Nachrichten grün, schlechte rot, der Rest blau
+function meldungsFarben(ton) {
+  if (ton === 'gut') return { grund: 'rgba(24, 74, 48, 0.92)', rand: '#4cc38a' };
+  if (ton === 'neutral') return { grund: 'rgba(24, 54, 78, 0.92)', rand: '#5aa9d6' };
+  return { grund: 'rgba(78, 28, 28, 0.92)', rand: '#e2685f' };
 }
 
 // Eine Kachel der Bedienleiste: Titel, aktueller Stand, Hinweis darunter
@@ -3018,6 +3670,8 @@ function drawHud() {
       stand:
         state.boote === 0
           ? `${BOOTSVERLEIH_COST}€`
+          : bootSperreHeute
+          ? '🦈 heute gesperrt'
           : `${bootFlotte.filter((b) => b.aktiv).length}/${state.boote} unterwegs`,
       hinweis:
         state.boote >= MAX_BOOTE
@@ -3111,13 +3765,43 @@ function drawHud() {
     }
   }
 
+  // Meldung eines Zwischenfalls
+  if (meldung) {
+    const k = getMeldungRect();
+    const farben = meldungsFarben(meldung.ton);
+    ctx.globalAlpha = Math.min(1, meldung.life * 3);
+    ctx.fillStyle = farben.grund;
+    ctx.beginPath();
+    ctx.roundRect(k.x, k.y, k.w, k.h, 12);
+    ctx.fill();
+    ctx.strokeStyle = farben.rand;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.font = '30px sans-serif';
+    ctx.fillText(meldung.icon, k.x + 12, k.y + 48);
+    const textX = k.x + 58;
+    const textB = k.w - 70;
+    ctx.fillStyle = '#ffffff';
+    setzeSchriftPassend(meldung.titel, textB, 17, 11, true);
+    ctx.fillText(meldung.titel, textX, k.y + 27);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.font = '12px sans-serif';
+    zeilenUmbrechen(meldung.text, textB, 3).forEach((zeile, i) => {
+      ctx.fillText(zeile, textX, k.y + 46 + i * 15);
+    });
+    ctx.globalAlpha = 1;
+  }
+
   // Kurze Tagesabrechnung
   if (dayBanner) {
     ctx.globalAlpha = Math.min(1, dayBanner.life * 2.5);
     ctx.font = 'bold 19px sans-serif';
     ctx.textAlign = 'center';
     const bw = ctx.measureText(dayBanner.text).width + 36;
-    const by = top.h + 10;
+    // unter die Meldung rutschen, sonst liegen beide Karten übereinander
+    const by = top.h + 10 + (meldung ? getMeldungRect().h + 8 : 0);
     ctx.fillStyle = 'rgba(18, 50, 74, 0.85)';
     ctx.beginPath();
     ctx.roundRect(hud.width / 2 - bw / 2, by, bw, 38, 10);
@@ -3154,6 +3838,55 @@ function drawHud() {
     resetBtn.x + resetBtn.w / 2,
     resetBtn.y + resetBtn.h / 2 + 5
   );
+
+  // Entscheidung: solange die Karte offen ist, steht der Strandtag still
+  if (ereignis && ereignis.frage) {
+    const f = ereignis.frage;
+    const k = getFrageRect();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fillRect(0, 0, hud.width, hud.height);
+
+    ctx.fillStyle = 'rgba(16, 32, 46, 0.97)';
+    ctx.beginPath();
+    ctx.roundRect(k.x, k.y, k.w, k.h, 14);
+    ctx.fill();
+    ctx.strokeStyle = '#e2685f';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.font = '38px sans-serif';
+    ctx.fillText(f.icon, k.x + k.w / 2, k.y + 48);
+    ctx.fillStyle = '#ffffff';
+    setzeSchriftPassend(f.titel, k.w - 28, 20, 13, true);
+    ctx.fillText(f.titel, k.x + k.w / 2, k.y + 76);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.82)';
+    ctx.font = '13px sans-serif';
+    zeilenUmbrechen(f.text, k.w - 34, 4).forEach((zeile, i) => {
+      ctx.fillText(zeile, k.x + k.w / 2, k.y + 99 + i * 17);
+    });
+
+    // Zahlen geht nur, wenn das Geld auch da ist
+    const bezahlbar = state.money >= (f.jaKosten || 0);
+    [
+      { rect: getFrageButtonRect(0), text: f.ja, grund: bezahlbar ? '#2f5d3a' : '#243040', aktiv: bezahlbar },
+      { rect: getFrageButtonRect(1), text: f.nein, grund: '#5c2b2b', aktiv: true },
+    ].forEach((b) => {
+      ctx.fillStyle = b.grund;
+      ctx.beginPath();
+      ctx.roundRect(b.rect.x, b.rect.y, b.rect.w, b.rect.h, 10);
+      ctx.fill();
+      ctx.fillStyle = b.aktiv ? '#ffffff' : 'rgba(255, 255, 255, 0.4)';
+      setzeSchriftPassend(b.text, b.rect.w - 14, 16, 10, true);
+      ctx.fillText(b.text, b.rect.x + b.rect.w / 2, b.rect.y + b.rect.h / 2 + 6);
+    });
+
+    if (!bezahlbar) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.font = '11px sans-serif';
+      ctx.fillText('So viel hast du nicht in der Kasse.', k.x + k.w / 2, k.y + k.h - 66);
+    }
+  }
 
   // Season-Abrechnung
   if (dayEnded) {
