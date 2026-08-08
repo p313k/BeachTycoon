@@ -174,6 +174,7 @@ const BAR_TRINK_MS = 5200; // wie lange ein Gast sitzen bleibt, bevor er zahlt
 
 const GAST_SPEED = 5.4; // wie schnell Gäste über den Sand laufen
 const GAST_GEDULD_MS = 5000; // so lange wartet ein Gast ruhig auf den Check-in, danach wird er sauer
+const GAST_AUFGABE_MS = GAST_GEDULD_MS + 2000; // 2s nach dem roten Kopf gibt er entnervt auf und geht
 
 // --- Zwischenfälle: was einem am Strand so dazwischenkommt ---
 const EREIGNIS_AB_TAG = 3; // die ersten Tage bleiben in Ruhe
@@ -2115,6 +2116,22 @@ function updateAbreise(dt) {
   }
 }
 
+// Wer trotz rotem Kopf weitere 2 Sekunden nicht bedient wird (7s insgesamt),
+// gibt entnervt auf und geht wieder – sonst stünde er ewig auf demselben Fleck.
+// Die Liege wird dabei sofort wieder frei, ein neuer Gast kann nachrücken.
+function updateWartendeAufgabe(now) {
+  loungers.forEach((l, i) => {
+    if (!l.waiting || l.wartetSeit === null) return;
+    if (now - l.wartetSeit <= GAST_AUFGABE_MS) return;
+    const w = wartePlatz(i);
+    abreisende.push({ ...makeLaeufer(w, wegZumAusgang(i)), liege: i, wut: true });
+    addPopup(w.x, 1.8, w.z, '😤 weg!');
+    l.waiting = false;
+    l.wartetSeit = null;
+    l.nextSpawn = now + spawnPause();
+  });
+}
+
 // --- Figuren gehen sich aus dem Weg ---
 // Sonst laufen Gäste, Personal und Eismänner mitten durcheinander hindurch.
 // Nach allen Bewegungen werden zu enge Paare auseinandergeschoben. Wer dabei
@@ -3363,6 +3380,7 @@ function update(now) {
     updatePlayer(dt);
     checkInNearbyCustomers();
     cleanNearbyLoungers();
+    updateWartendeAufgabe(now);
     if (state.staff > 0) updateLiegeStaff(dt);
     updateEisWuensche(now);
     if (hatEiswagen()) updateEismann(dt);
@@ -3433,7 +3451,7 @@ function drawScene() {
     const f = l.anreise || l.barLaeufer;
     if (f) drawPerson(f.x, f.z, COL.gastShirt, f.blick, f.schritt);
   });
-  abreisende.forEach((a) => drawPerson(a.x, a.z, COL.gastShirt, a.blick, a.schritt));
+  abreisende.forEach((a) => drawPerson(a.x, a.z, COL.gastShirt, a.blick, a.schritt, null, a.wut));
   if (ereignis && ereignis.zeichnen) ereignis.zeichnen();
   // In der Ich-Perspektive steckt die Kamera im Kopf – die eigene Figur bliebe im Weg
   if (!istEgoSicht()) drawPerson(player.x, player.z, COL.spielerShirt, player.blick, player.schritt);
