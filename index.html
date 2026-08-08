@@ -173,6 +173,7 @@ const BAR_HOCKER = 4; // so viele Gäste passen gleichzeitig an den Tresen
 const BAR_TRINK_MS = 5200; // wie lange ein Gast sitzen bleibt, bevor er zahlt
 
 const GAST_SPEED = 5.4; // wie schnell Gäste über den Sand laufen
+const GAST_GEDULD_MS = 5000; // so lange wartet ein Gast ruhig auf den Check-in, danach wird er sauer
 
 // --- Zwischenfälle: was einem am Strand so dazwischenkommt ---
 const EREIGNIS_AB_TAG = 3; // die ersten Tage bleiben in Ruhe
@@ -414,6 +415,7 @@ function makeLounger() {
     barBis: 0,
     barLaeufer: null,
     anreise: null, // Gast, der noch vom Eingang zur Liege unterwegs ist
+    wartetSeit: null, // seit wann der Gast auf den Check-in wartet
   };
 }
 
@@ -1065,18 +1067,21 @@ const COL = {
   moeweFluegel: [0.78, 0.82, 0.88],
   moeweSchnabel: [0.95, 0.7, 0.2],
   regen: [0.74, 0.82, 0.9],
+  wutKopf: [0.86, 0.14, 0.14], // Kopf eines Gastes, der zu lange warten musste
 };
 
 // --- Figuren ---
 // hut ist optional: statt der Haare bekommt die Figur dann einen Hut mit Krempe,
-// damit man Mafia und Ordnungsamt schon von weitem von den Gästen unterscheidet
-function drawPerson(x, z, shirt, blickY, gehPhase, hut) {
+// damit man Mafia und Ordnungsamt schon von weitem von den Gästen unterscheidet.
+// wut ist optional: Kopf und Hals färben sich rot, für Gäste, die zu lange warten.
+function drawPerson(x, z, shirt, blickY, gehPhase, hut, wut) {
   const schwung = Math.sin(gehPhase) * 0.3;
   // quer zur Blickrichtung stehen die Beine nebeneinander, längs schwingen sie beim Gehen
   const qx = Math.cos(blickY);
   const qz = -Math.sin(blickY);
   const lx = Math.sin(blickY);
   const lz = Math.cos(blickY);
+  const kopfFarbe = wut ? COL.wutKopf : COL.hautGast;
   shadow(x, z, 0.8);
   // Beine
   box([x + qx * 0.13 + lx * schwung * 0.25, 0.36, z + qz * 0.13 + lz * schwung * 0.25], [0.17, 0.72, 0.19], COL.hose, blickY, 0);
@@ -1087,8 +1092,8 @@ function drawPerson(x, z, shirt, blickY, gehPhase, hut) {
   box([x + qx * 0.33, 1.02, z + qz * 0.33], [0.13, 0.55, 0.15], COL.hautGast, blickY, 0);
   box([x - qx * 0.33, 1.02, z - qz * 0.33], [0.13, 0.55, 0.15], COL.hautGast, blickY, 0);
   // Hals, Kopf und Haar
-  box([x, 1.38, z], [0.14, 0.12, 0.14], COL.hautGast, blickY, 0);
-  box([x, 1.6, z], [0.32, 0.34, 0.3], COL.hautGast, blickY, 0);
+  box([x, 1.38, z], [0.14, 0.12, 0.14], kopfFarbe, blickY, 0);
+  box([x, 1.6, z], [0.32, 0.34, 0.3], kopfFarbe, blickY, 0);
   box([x, 1.75, z], [0.34, 0.1, 0.32], hut || COL.haar, blickY, 0);
   if (hut) {
     box([x, 1.79, z], [0.58, 0.05, 0.56], hut, blickY, 0); // Krempe
@@ -1169,7 +1174,7 @@ function drawLounger(index) {
   } else if (l.booked && !l.aufSee && !l.imPool && !l.barPhase) {
     drawLiegenderGast(w.x, w.z + 0.15, breit);
   } else if (l.waiting) {
-    drawPerson(w.x + breite * 0.5 + 0.9, w.z + 0.9, COL.gastShirt, Math.PI, 0);
+    drawPerson(w.x + breite * 0.5 + 0.9, w.z + 0.9, COL.gastShirt, Math.PI, 0, null, gastIstVeraergert(l));
   }
 
   if (selectedLounger === index) {
@@ -2075,8 +2080,14 @@ function updateGastAnreise(dt, now) {
     if (laeuferGehen(l.anreise, dt, GAST_SPEED)) {
       l.anreise = null;
       l.waiting = true;
+      l.wartetSeit = now;
     }
   });
+}
+
+// Wer länger als GAST_GEDULD_MS unbedient auf seiner Liege steht, wird sichtbar sauer
+function gastIstVeraergert(l) {
+  return l.waiting && l.wartetSeit !== null && performance.now() - l.wartetSeit > GAST_GEDULD_MS;
 }
 
 // --- Abreise: nach Feierabend laufen die Gäste sichtbar vom Strand ---
@@ -2180,33 +2191,43 @@ function schiebeAuseinander(a, b, anteilA) {
   }
 }
 
+// Ein einzelner Durchgang reicht nicht immer: schiebt man A von B weg, kann A
+// dabei in C hineinrutschen. Mehrere Durchgänge pro Bild lösen solche Ketten
+// zuverlässig auf – bei der kleinen Zahl Figuren am Strand ist das spielend billig.
+const AUSWEICH_DURCHGAENGE = 4;
+
 function figurenAuseinanderschieben() {
   const bewegt = bewegteFiguren();
-  for (let i = 0; i < bewegt.length; i++) {
-    for (let j = i + 1; j < bewegt.length; j++) schiebeAuseinander(bewegt[i], bewegt[j], 0.5);
-  }
   const stehend = stehendeFiguren();
-  for (const f of bewegt) {
-    for (const s of stehend) schiebeAuseinander(f, s, 1);
-  }
-
-  // Die Spielfigur selbst weicht bisher niemandem aus: beim Zulaufen auf einen
-  // wartenden Gast (zum Einchecken) oder eine gehende Figur gab es nichts, was
-  // die beiden physisch getrennt hätte – man lief einfach durch sie hindurch.
-  // Die Spielfigur wird deshalb von allen weggeschoben, ohne dass die anderen
-  // dafür ihre Position verlieren. Der Check-in-Radius (CELL*0.85 ≈ 2,2m) ist
-  // deutlich größer als dieser Mindestabstand (0,85m), das Einchecken klappt
-  // also längst, bevor die Spielfigur überhaupt an den Gast heranstößt.
-  for (const s of stehend) {
-    if (s !== player) schiebeAuseinander(player, s, 1);
-  }
-  for (const f of bewegt) schiebeAuseinander(player, f, 1);
-  // Der Schub kann die Spielfigur aus dem erlaubten Bereich oder in ein festes
-  // Möbelstück drücken – dieselbe Randkorrektur wie nach der eigenen Bewegung.
   const b = beachBounds();
-  player.x = Math.min(Math.max(player.x, b.xMin), b.xMax);
-  player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
-  schiebeAusLiegen(player);
+
+  for (let durchgang = 0; durchgang < AUSWEICH_DURCHGAENGE; durchgang++) {
+    for (let i = 0; i < bewegt.length; i++) {
+      for (let j = i + 1; j < bewegt.length; j++) schiebeAuseinander(bewegt[i], bewegt[j], 0.5);
+    }
+    for (const f of bewegt) {
+      for (const s of stehend) schiebeAuseinander(f, s, 1);
+    }
+
+    // Die Spielfigur selbst weicht bisher niemandem aus: beim Zulaufen auf einen
+    // wartenden Gast (zum Einchecken) oder eine gehende Figur gab es nichts, was
+    // die beiden physisch getrennt hätte – man lief einfach durch sie hindurch.
+    // Die Spielfigur wird deshalb von allen weggeschoben, ohne dass die anderen
+    // dafür ihre Position verlieren. Der Check-in-Radius (CELL*0.85 ≈ 2,2m) ist
+    // deutlich größer als dieser Mindestabstand (0,85m), das Einchecken klappt
+    // also längst, bevor die Spielfigur überhaupt an den Gast heranstößt.
+    for (const s of stehend) {
+      if (s !== player) schiebeAuseinander(player, s, 1);
+    }
+    for (const f of bewegt) schiebeAuseinander(player, f, 1);
+    // Der Schub kann die Spielfigur aus dem erlaubten Bereich oder in ein festes
+    // Möbelstück drücken – dieselbe Randkorrektur wie nach der eigenen Bewegung,
+    // und das in jedem Durchgang, sonst würde sie in den nächsten Vergleichen
+    // wieder von der falschen Position aus gerechnet.
+    player.x = Math.min(Math.max(player.x, b.xMin), b.xMax);
+    player.z = Math.min(Math.max(player.z, b.zMin), b.zMax);
+    schiebeAusLiegen(player);
+  }
 }
 
 // --- Liegen-Personal: mehrere sichtbare Leute, die von Liege zu Liege laufen ---
@@ -3521,7 +3542,10 @@ function drawHud() {
     if (!l.waiting && !l.willEis && !l.willBoot && !l.willPool && !l.willBar) return;
     const w = loungerWorld(i);
     const p = worldToScreen(w.x, 1.15, w.z + 0.9);
-    const text = l.waiting
+    const wut = l.waiting && gastIstVeraergert(l);
+    const text = wut
+      ? '@#☠️⚡️'
+      : l.waiting
       ? `${loungerPrice(i)}€`
       : l.willEis
       ? '🍦'
@@ -3530,14 +3554,14 @@ function drawHud() {
       : l.willPool
       ? '🏊'
       : '🍹';
-    if (p) schilder.push({ p, text });
+    if (p) schilder.push({ p, text, wut });
   });
   schilder.sort((a, b) => a.p.y - b.p.y);
   ctx.font = 'bold 13px sans-serif';
   ctx.textAlign = 'center';
-  schilder.forEach(({ p, text }) => {
+  schilder.forEach(({ p, text, wut }) => {
     const bw = ctx.measureText(text).width + 14;
-    ctx.fillStyle = 'rgba(10, 30, 45, 0.78)';
+    ctx.fillStyle = wut ? 'rgba(140, 20, 20, 0.88)' : 'rgba(10, 30, 45, 0.78)';
     ctx.beginPath();
     ctx.roundRect(p.x - bw / 2, p.y - 20, bw, 20, 6);
     ctx.fill();
@@ -3724,6 +3748,8 @@ function drawHud() {
         const l = loungers[ziel];
         const zustand = l.dirty
           ? '🗑️ muss aufgeräumt werden'
+          : l.waiting && gastIstVeraergert(l)
+          ? `😡 Gast ist sauer · ${loungerPrice(ziel)}€`
           : l.waiting
           ? `🧍 Gast wartet · ${loungerPrice(ziel)}€`
           : l.willEis
